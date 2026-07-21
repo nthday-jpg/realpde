@@ -1,0 +1,31 @@
+# Bounded-controller policy for the agentic demo submission.
+# Tune these offline (e.g. with the upstream agentic_LTTTA ADK design agents:
+# https://github.com/PgUpDn/agentic_LTTTA) and ship the tuned file in your zip.
+# The scored loop just reads this file; mode "rule" stays fully deterministic.
+
+mode: rule            # rule | llm | fixed
+fixed_action: skip_update
+# base_model: cno     # set when model.pth's filename doesn't carry cno|fno|transolver
+
+# rule thresholds on the prev-pair rel-L2 (normalized space)
+err_low: 0.035
+err_high: 0.11
+ema_beta: 0.7
+
+# update_adapter knobs
+adapt_steps: 5
+adapt_lr: 0.001
+adapt_scope: bn       # bn (norm layers only) | all
+
+# recalibrate knob
+calib_momentum: 0.5
+
+# per-trajectory wall-clock budget for everything inside ttt_step
+time_budget_s: 60.0
+
+# mode: llm -- action selection through the organizer gateway
+# (OPENAI_BASE_URL / OPENAI_API_KEY / REALPDE_GATEWAY_MODEL are injected by the
+# evaluation container; if absent, the controller falls back to the rule policy)
+llm_every: 5
+llm_timeout_s: 5.0
+llm_max_tokens: 128
