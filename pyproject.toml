@@ -9,11 +9,13 @@ dependencies = [
     "einops>=0.8.2",
     "h5py>=3.16.0",
     "ipykernel>=7.3.0",
+    "kaggle>=1.7.4",
     "matplotlib>=3.10.9",
     "pyyaml>=6.0.3",
     "requests>=2.34.2",
     "setuptools<82",
     "spicy>=0.16.0",
+    "tqdm>=4.66.0",
     "torch>=2.13.0",
     "wandb>=0.29.0",
 ]
