@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import List, Tuple
 
@@ -11,11 +10,12 @@ from torch.utils.data import Dataset
 
 
 class PDEDataset(Dataset):
-    """HDF5 dataset for PDE velocity field sequences.
+    """HDF5 dataset for PDE velocity field sequences with full preloading.
 
-    Loads ``.h5`` files containing ``u``, ``v``, ``p`` datasets each of shape
-    ``(T, H_native, W_native)``.  Spatial subsampling (``sub_s``) is applied at
-    load time to reduce native ``64 x 128`` PIV grids to ``32 x 64``.
+    Loads all ``.h5`` files into memory at init time for fast training.
+    Each file contains ``u``, ``v``, ``p`` datasets of shape
+    ``(T, H_native, W_native)``.  Spatial subsampling (``sub_s``) is applied
+    at load time to reduce native ``64 x 128`` PIV grids to ``32 x 64``.
 
     Each sample is a ``(input, target)`` pair where:
 
@@ -47,37 +47,36 @@ class PDEDataset(Dataset):
         self.in_step = in_step
         self.out_step = out_step
         self.interval = interval
-        self.sub_s = sub_s
 
         data_dir = Path(data_dir)
         h5_files = sorted(f for f in data_dir.iterdir() if f.suffix == ".h5")
         if not h5_files:
             raise FileNotFoundError(f"No .h5 files found in {data_dir}")
 
-        self.samples: List[Tuple[Path, int]] = []
-        self.file_lengths: dict[Path, int] = {}
+        self.inputs: List[torch.Tensor] = []
+        self.targets: List[torch.Tensor] = []
+
         for path in h5_files:
             with h5py.File(path, "r") as f:
-                n_frames = f["u"].shape[0]
-            self.file_lengths[path] = n_frames
-            max_time_id = n_frames - (in_step + out_step)
-            for t in range(0, max_time_id + 1, interval):
-                self.samples.append((path, t))
+                u = np.asarray(f["u"][:, ::sub_s, ::sub_s], dtype=np.float32)
+                v = np.asarray(f["v"][:, ::sub_s, ::sub_s], dtype=np.float32)
+
+            p = np.zeros_like(u)
+            data = np.stack([u, v, p], axis=-1)  # (T, H, W, 3)
+            T = data.shape[0]
+
+            for t in range(0, T - in_step - out_step + 1, interval):
+                self.inputs.append(torch.from_numpy(data[t : t + in_step]))
+                self.targets.append(torch.from_numpy(data[t + in_step : t + in_step + out_step]))
+
+        if not self.inputs:
+            raise FileNotFoundError(
+                f"No valid samples found in {data_dir} "
+                f"(need at least {in_step + out_step} frames per file)"
+            )
 
     def __len__(self) -> int:
-        return len(self.samples)
+        return len(self.inputs)
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        path, t = self.samples[idx]
-        with h5py.File(path, "r") as f:
-            u = f["u"][t : t + self.in_step + self.out_step, :: self.sub_s, :: self.sub_s]
-            v = f["v"][t : t + self.in_step + self.out_step, :: self.sub_s, :: self.sub_s]
-
-        u = np.asarray(u, dtype=np.float32)
-        v = np.asarray(v, dtype=np.float32)
-        p = np.zeros_like(u)
-        data = np.stack([u, v, p], axis=-1)  # (T, H, W, 3)
-
-        inp = torch.from_numpy(data[: self.in_step])
-        tgt = torch.from_numpy(data[self.in_step : self.in_step + self.out_step])
-        return inp, tgt
+        return self.inputs[idx], self.targets[idx]
