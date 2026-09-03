@@ -57,7 +57,7 @@ class ModelAdapter(nn.Module):
         adapter = ModelAdapter.from_baseline("sim_real_cno.pth", device="cuda")
 
         # From a pretrained model
-        from models.unet import UNet, UNetConfig
+        from realpde.models.unet import UNet, UNetConfig
         adapter = ModelAdapter.from_pretrained(UNet(UNetConfig()), "checkpoint.pth")
     """
 
@@ -78,9 +78,12 @@ class ModelAdapter(nn.Module):
         from ``load_baseline.load_checkpoint_state``.
         """
         import sys
-        _HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        if _HERE not in sys.path:
-            sys.path.insert(0, _HERE)
+        from pathlib import Path
+
+        # load_baseline.py lives at repo root, not in src/realpde
+        _REPO_ROOT = Path(__file__).resolve().parents[3]
+        if str(_REPO_ROOT) not in sys.path:
+            sys.path.insert(0, str(_REPO_ROOT))
 
         from load_baseline import detect_model_type, build_model, load_checkpoint_state
 

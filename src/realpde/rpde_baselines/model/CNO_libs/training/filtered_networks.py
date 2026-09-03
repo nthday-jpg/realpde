@@ -115,11 +115,11 @@ import numpy as np
 import scipy.signal
 import scipy.optimize
 import torch
-from rpde_baselines.model.CNO_libs.local_torch_utils import misc
-from rpde_baselines.model.CNO_libs.local_torch_utils import persistence
-from rpde_baselines.model.CNO_libs.local_torch_utils.ops import conv2d_gradfix
-from rpde_baselines.model.CNO_libs.local_torch_utils.ops import filtered_lrelu
-from rpde_baselines.model.CNO_libs.local_torch_utils.ops import bias_act
+from realpde.rpde_baselines.model.CNO_libs.local_torch_utils import misc
+from realpde.rpde_baselines.model.CNO_libs.local_torch_utils import persistence
+from realpde.rpde_baselines.model.CNO_libs.local_torch_utils.ops import conv2d_gradfix
+from realpde.rpde_baselines.model.CNO_libs.local_torch_utils.ops import filtered_lrelu
+from realpde.rpde_baselines.model.CNO_libs.local_torch_utils.ops import bias_act
 
 import torch.nn.utils.parametrize as parametrize
 import torch.nn as nn

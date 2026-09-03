@@ -3,8 +3,8 @@ import torch
 import numpy as np
 import torch.nn as nn
 from torch.nn.init import trunc_normal_
-from rpde_baselines.model.TRANSOLVER_libs.Embedding import timestep_embedding
-from rpde_baselines.model.TRANSOLVER_libs.Physics_Attention import Physics_Attention_Structured_Mesh_3D
+from realpde.rpde_baselines.model.TRANSOLVER_libs.Embedding import timestep_embedding
+from realpde.rpde_baselines.model.TRANSOLVER_libs.Physics_Attention import Physics_Attention_Structured_Mesh_3D
 
 ACTIVATION = {'gelu': nn.GELU, 'tanh': nn.Tanh, 'sigmoid': nn.Sigmoid, 'relu': nn.ReLU, 'leaky_relu': nn.LeakyReLU(0.1),
               'softplus': nn.Softplus, 'ELU': nn.ELU, 'silu': nn.SiLU}

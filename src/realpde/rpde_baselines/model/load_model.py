@@ -10,7 +10,7 @@ def load_model(train_dataset, device='cpu', **kwargs):
 
     logging.info(f"Loading model {model_name} with input shape {input_shape} and output shape {output_shape}")
     if model_name == 'fno':
-        from rpde_baselines.model.fno import FNO3d
+        from realpde.rpde_baselines.model.fno import FNO3d
         model = FNO3d(
             modes1=kwargs['modes1'], 
             modes2=kwargs['modes2'], 
@@ -22,8 +22,8 @@ def load_model(train_dataset, device='cpu', **kwargs):
             ).to(device)
 
     elif model_name == 'wdno':
-        from rpde_baselines.model.wdno_libs.unet import Unet3d
-        from rpde_baselines.model.wdno import WDNO
+        from realpde.rpde_baselines.model.wdno_libs.unet import Unet3d
+        from realpde.rpde_baselines.model.wdno import WDNO
         base_model = Unet3d(
             dim = kwargs['dim'],
             dim_mults = kwargs['dim_mults'],
@@ -47,7 +47,7 @@ def load_model(train_dataset, device='cpu', **kwargs):
     elif model_name == 'unet':
         # input: [bz, t, x, y, c_in]
         # output: [bz, t, x, y, c_out]
-        from rpde_baselines.model.unet import Unet3d
+        from realpde.rpde_baselines.model.unet import Unet3d
         model = Unet3d(
                     dim=input_shape[1], 
                     out_channels=output_shape[-1],
@@ -58,7 +58,7 @@ def load_model(train_dataset, device='cpu', **kwargs):
                     ).to(device)
         
     elif model_name == 'cno':
-        from rpde_baselines.model.cno import CNO3d
+        from realpde.rpde_baselines.model.cno import CNO3d
         if output_shape[0] > input_shape[0] and output_shape[0] % input_shape[0] == 0:
             out_dim_mult = output_shape[0] // input_shape[0]
         elif output_shape[0] == input_shape[0]:
@@ -75,7 +75,7 @@ def load_model(train_dataset, device='cpu', **kwargs):
                     ).to(device)
         
     elif model_name == 'galerkin_transformer':
-        from rpde_baselines.model.galerkin_transformer import GalerkinTransformer3d
+        from realpde.rpde_baselines.model.galerkin_transformer import GalerkinTransformer3d
         kwargs['node_feats'] = input_shape[-1]
         kwargs['n_targets'] = output_shape[-1]
         kwargs['shape_in'] = input_shape
@@ -91,7 +91,7 @@ def load_model(train_dataset, device='cpu', **kwargs):
         model = GalerkinTransformer3d(**kwargs).to(device)
 
     elif model_name == 'mwt':
-        from rpde_baselines.model.MWT_libs.models import MWT3d
+        from realpde.rpde_baselines.model.MWT_libs.models import MWT3d
         # from model.MWT_libs.models_fix import MWT3d
         
         kwargs['shape_in'] = input_shape
@@ -106,7 +106,7 @@ def load_model(train_dataset, device='cpu', **kwargs):
         
         model = MWT3d(**kwargs).to(device)
     elif model_name == 'dpot':
-        from rpde_baselines.model.dpot import DPOT
+        from realpde.rpde_baselines.model.dpot import DPOT
         model = DPOT(
             shape_in=input_shape,
             shape_out=output_shape,
@@ -130,7 +130,7 @@ def load_model(train_dataset, device='cpu', **kwargs):
             checkpoint_path=kwargs["checkpoint_path"],
         ).to(device)
     elif model_name == 'deeponet':
-        from rpde_baselines.model.deeponet import DeepONet
+        from realpde.rpde_baselines.model.deeponet import DeepONet
         
         model = DeepONet(
             shape_in=input_shape,
@@ -143,7 +143,7 @@ def load_model(train_dataset, device='cpu', **kwargs):
         ).to(device)
 
     elif model_name == 'transolver':
-        from rpde_baselines.model.TRANSOLVER_libs.Transolver_Structured_Mesh_3D import Model
+        from realpde.rpde_baselines.model.TRANSOLVER_libs.Transolver_Structured_Mesh_3D import Model
         
         model = Model(
             space_dim=kwargs['space_dim'], n_layers=kwargs['n_layers'], n_hidden=kwargs['n_hidden'], n_head=kwargs['n_head'],
@@ -152,7 +152,7 @@ def load_model(train_dataset, device='cpu', **kwargs):
         ).to(device)
     
     elif model_name == 'dmd':
-        from rpde_baselines.model.dmd import DMD
+        from realpde.rpde_baselines.model.dmd import DMD
         model = DMD(n_modes=kwargs['n_modes'], n_predict=kwargs['n_predict'], input_feature=kwargs['input_feature'], n_autoregressive=kwargs['N_autoregressive'])
         # model = dmd_model.dmd_run
 

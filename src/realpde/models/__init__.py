@@ -1,6 +1,6 @@
-from models.base import PretrainModel
-from models.adapter import ModelAdapter
-from models.unet import UNet, UNetConfig
+from realpde.models.base import PretrainModel
+from realpde.models.adapter import ModelAdapter
+from realpde.models.unet import UNet, UNetConfig
 
 _MODEL_REGISTRY: dict[str, type] = {
     "unet": UNet,

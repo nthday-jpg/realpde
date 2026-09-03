@@ -9,8 +9,8 @@ import numpy as np
 import torch.nn as nn
 import torch.nn.functional as F
 
-from rpde_baselines.model.model import Model
-from rpde_baselines.utils.metrics import mse_loss
+from realpde.rpde_baselines.model.model import Model
+from realpde.rpde_baselines.utils.metrics import mse_loss
 
 # 3d fourier layers
 class SpectralConv3d(nn.Module):

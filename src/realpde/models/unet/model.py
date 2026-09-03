@@ -3,8 +3,8 @@ from __future__ import annotations
 import torch
 import torch.nn as nn
 
-from models.base import PretrainModel
-from models.unet.config import UNetConfig
+from realpde.models.base import PretrainModel
+from realpde.models.unet.config import UNetConfig
 
 
 class DoubleConv(nn.Module):

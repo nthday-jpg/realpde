@@ -20,7 +20,7 @@ import inspect
 import copy
 import uuid
 import types
-from rpde_baselines.model.CNO_libs import dnnlib
+from realpde.rpde_baselines.model.CNO_libs import dnnlib
 
 #----------------------------------------------------------------------------
 

@@ -25,10 +25,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
 _HERE = Path(__file__).resolve().parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
+_SRC = _HERE / "src"
+for _p in (str(_SRC), str(_HERE)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-from datasets import PDEDataset
+from realpde.datasets import PDEDataset
 
 
 def _infer_unet_cfg(ckpt_obj, args):
@@ -44,7 +46,7 @@ def build_unet_from_ckpt(ckpt_path: Path, device: str):
     obj = torch.load(ckpt_path, map_location="cpu", weights_only=False)
     state = obj["model_state_dict"] if isinstance(obj, dict) and "model_state_dict" in obj else obj
     cfg = _infer_unet_cfg(obj, argparse.Namespace(in_step=20, out_step=20, channels=16, n_layers=2))
-    from models.unet import UNet, UNetConfig
+    from realpde.models.unet import UNet, UNetConfig
     model_cfg = UNetConfig(in_step=cfg["in_step"], out_step=cfg["out_step"], channels=cfg["channels"], n_layers=cfg["n_layers"])
     model = UNet(model_cfg)
     model.load_state_dict(state, strict=True)

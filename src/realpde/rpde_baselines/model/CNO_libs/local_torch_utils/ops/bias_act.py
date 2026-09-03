@@ -11,7 +11,7 @@
 import os
 import numpy as np
 import torch
-from rpde_baselines.model.CNO_libs import dnnlib
+from realpde.rpde_baselines.model.CNO_libs import dnnlib
 
 from .. import custom_ops
 from .. import misc

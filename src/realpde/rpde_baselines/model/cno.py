@@ -12,9 +12,9 @@
 import torch.nn as nn
 
 import torch
-from rpde_baselines.model.model import Model
-from rpde_baselines.utils.metrics import mse_loss
-from rpde_baselines.model.CNO_libs.training.filtered_networks import (
+from realpde.rpde_baselines.model.model import Model
+from realpde.rpde_baselines.utils.metrics import mse_loss
+from realpde.rpde_baselines.model.CNO_libs.training.filtered_networks import (
     LReLu,  # Either "filtered LReLU" or regular LReLu
 )
 

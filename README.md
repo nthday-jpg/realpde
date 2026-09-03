@@ -8,7 +8,7 @@ Long-Term Test-Time Adaptation on streaming real-world PIV data.
 ### Run baseline with TTT adaptation
 
 ```python
-from models import ModelAdapter
+from realpde.models import ModelAdapter
 from submission_template import ReferenceTTTModel
 
 adapter = ModelAdapter.from_baseline("data/baseline_checkpoints/sim_real_ft/sim_real_cno.pth", device="cuda")
@@ -18,7 +18,7 @@ model = ReferenceTTTModel(adapter.model, device="cuda")
 ### Run pretrained model with TTT adaptation
 
 ```python
-from models import ModelAdapter, get_model
+from realpde.models import ModelAdapter, get_model
 from submission_template import ReferenceTTTModel
 
 model = get_model("unet")
@@ -47,18 +47,19 @@ Set config via environment variables or notebook globals before launch.
 
 ```
 realpde/
-├── models/
-│   ├── __init__.py          # get_model() factory + ModelAdapter
-│   ├── base.py              # PretrainModel ABC
-│   ├── adapter.py           # ModelAdapter: wraps baselines or pretrained models
-│   └── unet/
-│       ├── __init__.py
-│       ├── config.py        # UNetConfig dataclass
-│       └── model.py         # Per-frame 2D UNet
-│
-├── datasets/
-│   ├── __init__.py
-│   └── pde_dataset.py       # HDF5 loader, (input, target) windows
+├── src/realpde/
+│   ├── datasets/
+│   │   ├── __init__.py
+│   │   └── pde_dataset.py   # HDF5 loader, (input, target) windows
+│   ├── models/
+│   │   ├── __init__.py      # get_model() factory + ModelAdapter
+│   │   ├── base.py          # PretrainModel ABC
+│   │   ├── adapter.py       # ModelAdapter: wraps baselines or pretrained models
+│   │   └── unet/
+│   │       ├── __init__.py
+│   │       ├── config.py    # UNetConfig dataclass
+│   │       └── model.py     # Per-frame 2D UNet
+│   └── rpde_baselines/      # Vendored baseline model code
 │
 ├── trainer.py               # Accelerate pretrainer (teacher forcing, wandb)
 ├── notebook/
@@ -115,7 +116,7 @@ models/
 ### 2. Define the config dataclass
 
 ```python
-# models/your_model/config.py
+# src/realpde/models/your_model/config.py
 from dataclasses import dataclass
 
 @dataclass
@@ -132,11 +133,11 @@ class YourModelConfig:
 ### 3. Implement the model
 
 ```python
-# models/your_model/model.py
+# src/realpde/models/your_model/model.py
 import torch
 import torch.nn as nn
-from models.base import PretrainModel
-from models.your_model.config import YourModelConfig
+from realpde.models.base import PretrainModel
+from realpde.models.your_model.config import YourModelConfig
 
 class YourModel(PretrainModel):
     def __init__(self, config: YourModelConfig | None = None):
@@ -155,8 +156,8 @@ class YourModel(PretrainModel):
 ### 4. Register in the factory
 
 ```python
-# models/__init__.py
-from models.your_model import YourModel
+# src/realpde/models/__init__.py
+from realpde.models.your_model import YourModel
 
 _MODEL_REGISTRY = {
     "unet": UNet,
@@ -170,7 +171,7 @@ In `trainer.py`, add an `elif` branch in the model construction block:
 
 ```python
 elif model_name == "your_model":
-    from models.your_model import YourModel, YourModelConfig
+    from realpde.models.your_model import YourModel, YourModelConfig
     model_cfg = YourModelConfig(
         in_step=in_step, out_step=out_step,
         # pass config params
@@ -181,7 +182,7 @@ elif model_name == "your_model":
 ### 6. Use it
 
 ```python
-from models import get_model, ModelAdapter
+from realpde.models import get_model, ModelAdapter
 
 model = get_model("your_model", hidden_dim=128, n_layers=6)
 adapter = ModelAdapter.from_pretrained(model, "checkpoints/best.pth")
@@ -209,6 +210,7 @@ adapter = ModelAdapter.from_pretrained(model, "checkpoints/best.pth")
 
 ```python
 # From baseline checkpoint (auto-detects FNO/CNO/Transolver)
+from realpde.models import ModelAdapter
 adapter = ModelAdapter.from_baseline("sim_real_cno.pth", device="cuda")
 
 # From pretrained model + checkpoint
@@ -260,7 +262,7 @@ sim_pretrain/          sim_real_ft/           (fine-tuned on real, best start)
 Load any baseline:
 
 ```python
-from models import ModelAdapter
+from realpde.models import ModelAdapter
 adapter = ModelAdapter.from_baseline("sim_real_cno.pth")
 ```
 

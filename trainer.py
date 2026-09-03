@@ -34,11 +34,13 @@ from torch.utils.data import DataLoader, random_split
 from tqdm.auto import tqdm
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
+_SRC = os.path.join(_HERE, "src")
+for _p in (_SRC, _HERE):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
-from datasets import PDEDataset
-from models import get_model, ModelAdapter
+from realpde.datasets import PDEDataset
+from realpde.models import get_model, ModelAdapter
 
 
 def _cfg(key: str, default=None):
@@ -78,7 +80,7 @@ def main():
 
     # --- Model -----------------------------------------------------------------
     if model_name == "unet":
-        from models.unet import UNet, UNetConfig
+        from realpde.models.unet import UNet, UNetConfig
         model_cfg = UNetConfig(
             in_step=in_step, out_step=out_step, channels=unet_channels,
             n_layers=unet_n_layers,

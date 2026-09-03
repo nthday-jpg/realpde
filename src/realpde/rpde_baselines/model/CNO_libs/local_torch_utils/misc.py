@@ -11,7 +11,7 @@ import contextlib
 import numpy as np
 import torch
 import warnings
-from rpde_baselines.model.CNO_libs import dnnlib
+from realpde.rpde_baselines.model.CNO_libs import dnnlib
 
 #----------------------------------------------------------------------------
 # Cached construction of constant tensors. Avoids CPU=>GPU copy when the

@@ -47,16 +47,14 @@ import numpy as np
 import torch
 
 # Make the vendored code importable no matter the current working directory.
-# Unlike the Track 1 kit, no _vendor/einops is shipped: the Track 2 evaluation
-# image already installs einops. The conditional keeps the loader portable if a
-# _vendor/ directory is ever added back.
 _HERE = os.path.dirname(os.path.abspath(__file__))
+_SRC = os.path.join(_HERE, "src")
 _VENDOR = os.path.join(_HERE, "_vendor")
-for _p in (_HERE, _VENDOR):
-    if os.path.isdir(_p) and _p not in sys.path:  # _VENDOR ends up first if present
+for _p in (_SRC, _HERE, _VENDOR):
+    if os.path.isdir(_p) and _p not in sys.path:
         sys.path.insert(0, _p)
 
-from rpde_baselines.model.load_model import load_model  # noqa: E402
+from realpde.rpde_baselines.model.load_model import load_model  # noqa: E402
 
 # Default foil eval geometry (32x64 = native 64x128 with sub_s_real=2).
 T_IN, T_OUT = 20, 20
