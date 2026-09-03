@@ -98,9 +98,44 @@ def main():
     n_val = max(1, int(0.1 * len(full_dataset)))
     train_ds, val_ds = random_split(full_dataset, [len(full_dataset) - n_val, n_val])
 
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,
-                              num_workers=0, drop_last=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=0)
+    # --- DataLoader workers: use maximum sensible, allow override via NUM_WORKERS ---
+    _num_workers_env = os.environ.get("NUM_WORKERS", "").strip()
+    if _num_workers_env != "":
+        try:
+            num_workers = int(_num_workers_env)
+        except ValueError:
+            num_workers = 0
+    else:
+        # auto: all CPUs split across processes, capped to 8 to avoid oversubscription
+        cpu_count = os.cpu_count() or 4
+        try:
+            n_proc = int(accelerator.num_processes) or 1
+        except Exception:
+            n_proc = 1
+        if n_proc > 1:
+            # per-process workers so total ≈ cpu_count
+            num_workers = max(1, cpu_count // n_proc)
+        else:
+            num_workers = cpu_count
+        num_workers = min(num_workers, 8)
+        # Kaggle T4x2: 4 CPUs -> 2 workers per rank; high-CPU machines -> up to 8
+    # accelerate handles multi-GPU sharding; DataLoader itself stays simple
+    _pin = torch.cuda.is_available()
+    _persistent = num_workers > 0
+    _prefetch = 2 if num_workers > 0 else None
+    if accelerator.is_main_process:
+        print(f"[Data] cpu_count={os.cpu_count()} num_processes={accelerator.num_processes} -> num_workers={num_workers} (override with NUM_WORKERS env)")
+
+    _loader_kwargs = dict(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=_pin,
+        persistent_workers=_persistent,
+    )
+    if _prefetch is not None:
+        _loader_kwargs["prefetch_factor"] = _prefetch
+    train_loader = DataLoader(train_ds, shuffle=True, drop_last=True, **_loader_kwargs)
+    val_loader = DataLoader(val_ds, shuffle=False, **_loader_kwargs)
 
     base, optimizer, train_loader, val_loader = accelerator.prepare(
         base, optimizer, train_loader, val_loader
