@@ -3,7 +3,7 @@ name = "realpde"
 version = "0.1.0"
 description = "Add your description here"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.11"
 dependencies = [
     "accelerate>=1.14.0",
     "einops>=0.8.2",
@@ -16,6 +16,6 @@ dependencies = [
     "setuptools<82",
     "spicy>=0.16.0",
     "tqdm>=4.66.0",
-    "torch>=2.0.0",
+    "torch>=2.13.0",
     "wandb>=0.29.0",
 ]
