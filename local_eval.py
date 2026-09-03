@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local CPU smoke test for a RealPDE Track 2 LTTTA submission.
+"""Local smoke test for a RealPDE Track 2 LTTTA submission.
 
 Self-contained: it does NOT need the downloaded ingestion/scoring programs. It
 mirrors the streaming loop of the official ingestion program on the tiny
@@ -12,9 +12,10 @@ synthetic example trajectories and is NOT comparable to the leaderboard; the
 official ingestion.py / scoring.py are authoritative.
 
 Usage:
+    python local_eval.py            # evaluates every checkpoint under ./data
     python local_eval.py --submission <dir with submission.py>
     python local_eval.py --submission ../solutions/baseline_solution
-    python local_eval.py            # defaults --submission to this kit dir
+    python local_eval.py --device cuda --checkpoint <baseline checkpoint.pth>
 
 The data layout mirrors CompetitionAirfoil(mode="test", dataset_type="real"):
     <data>/test_real/*.h5      (flat u, v[, p] datasets, native 64x128)
@@ -26,6 +27,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import os
+import subprocess
 import sys
 from pathlib import Path
 from time import perf_counter
@@ -110,7 +112,9 @@ class Normalizer:
 
     def postprocess_pred(self, pred_norm):
         c = pred_norm.shape[-1]
-        return pred_norm * self.std_tgt[..., :c] + self.mean_tgt[..., :c]
+        std = self.std_tgt[..., :c].to(pred_norm.device)
+        mean = self.mean_tgt[..., :c].to(pred_norm.device)
+        return pred_norm * std + mean
 
 
 # --------------------------------------------------------------------------- #
@@ -141,17 +145,72 @@ def rel_l2(pred: np.ndarray, target: np.ndarray, c: int) -> float:
     return float(np.mean(np.linalg.norm(p - t, axis=1) / denom))
 
 
+def run_all_checkpoints(args: argparse.Namespace) -> None:
+    """Evaluate each baseline in a fresh process so GPU memory is released."""
+    checkpoint_dir = Path(args.checkpoint_dir).resolve()
+    if not checkpoint_dir.is_dir():
+        raise SystemExit(f"Checkpoint directory not found: {checkpoint_dir}")
+
+    checkpoints = sorted(checkpoint_dir.rglob("*.pth"), key=lambda p: str(p).lower())
+    if not checkpoints:
+        raise SystemExit(f"No .pth checkpoints found under {checkpoint_dir}")
+
+    print(f"[local_eval] found {len(checkpoints)} checkpoints under {checkpoint_dir}",
+          flush=True)
+    failures = []
+    for index, checkpoint in enumerate(checkpoints, start=1):
+        print(f"\n{'=' * 78}", flush=True)
+        print(f"[local_eval] model {index}/{len(checkpoints)}: {checkpoint}", flush=True)
+        print(f"{'=' * 78}", flush=True)
+        command = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--submission", args.submission,
+            "--data", args.data,
+            "--device", args.device,
+            "--checkpoint", str(checkpoint),
+        ]
+        result = subprocess.run(command, check=False)
+        if result.returncode != 0:
+            failures.append((checkpoint, result.returncode))
+
+    passed = len(checkpoints) - len(failures)
+    print(f"\n[local_eval] summary: {passed}/{len(checkpoints)} checkpoints passed")
+    if failures:
+        for checkpoint, returncode in failures:
+            print(f"[local_eval] FAILED ({returncode}): {checkpoint}")
+        raise SystemExit(1)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--submission", default=str(HERE),
                     help="directory containing submission.py (default: this kit)")
     ap.add_argument("--data", default=str(HERE / "example_data"),
                     help="example_data directory (default: ./example_data)")
+    ap.add_argument("--checkpoint",
+                    help="baseline .pth checkpoint to load (CNO/FNO/Transolver)")
+    ap.add_argument("--checkpoint-dir", default=str(HERE / "data" / "baseline_checkpoints"),
+                    help="directory scanned when --checkpoint is omitted")
+    ap.add_argument("--device", default="auto",
+                    help="execution device: auto, cpu, cuda, cuda:0, ... (default: auto)")
     args = ap.parse_args()
+
+    if args.checkpoint is None:
+        run_all_checkpoints(args)
+        return
 
     submission_dir = Path(args.submission).resolve()
     data_dir = Path(args.data).resolve()
-    device = "cpu"
+    checkpoint_path = Path(args.checkpoint).resolve() if args.checkpoint else None
+    if checkpoint_path is not None and not checkpoint_path.is_file():
+        raise SystemExit(f"Checkpoint not found: {checkpoint_path}")
+
+    device = "cuda" if args.device == "auto" and torch.cuda.is_available() else args.device
+    if device == "auto":
+        device = "cpu"
+    if device.startswith("cuda") and not torch.cuda.is_available():
+        raise SystemExit("CUDA was requested, but torch.cuda.is_available() is False.")
 
     stats_path = data_dir / "mean_std_real.pt"
     if not stats_path.exists():
@@ -160,10 +219,18 @@ def main() -> None:
     stream = build_stream(data_dir)
     normalizer = Normalizer(stats_path)
     n_traj = len({s["sim_id"] for s in stream})
-    print(f"[local_eval] {len(stream)} steps over {n_traj} trajectories, batch size 1")
+    print(f"[local_eval] {len(stream)} steps over {n_traj} trajectories, "
+          f"batch size 1, device {device}")
+    if checkpoint_path is not None:
+        print(f"[local_eval] checkpoint: {checkpoint_path}")
 
     module = import_submission(submission_dir)
-    model = module.get_ttt_model(str(submission_dir), device)
+    if checkpoint_path is None:
+        model = module.get_ttt_model(str(submission_dir), device)
+    else:
+        model = module.get_ttt_model(
+            str(submission_dir), device, checkpoint_path=str(checkpoint_path)
+        )
     for attr in ("reset_ttt_state", "ttt_step"):
         if not hasattr(model, attr):
             raise SystemExit(f"get_ttt_model() returned an object lacking {attr}().")
@@ -183,8 +250,12 @@ def main() -> None:
         inp_norm, tgt_norm = normalizer.preprocess(inp, tgt)
         prev_target = prev_pair[1] if prev_pair is not None else None
 
+        if device.startswith("cuda"):
+            torch.cuda.synchronize(device)
         t0 = perf_counter()
         pred_norm, info = model.ttt_step(inp_norm, prev_target)
+        if device.startswith("cuda"):
+            torch.cuda.synchronize(device)
         per_step_times.append(perf_counter() - t0)
 
         prev_pair = (inp_norm.detach(), tgt_norm.detach())  # cache AFTER timing

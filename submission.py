@@ -23,34 +23,14 @@ from typing import Any, Dict, Optional, Tuple
 import torch
 import torch.nn as nn
 
+from load_baseline import load_baseline
+
 # The base class is a convenience only; evaluation is duck-typed, so this import
 # is optional. Fall back to nn.Module if ttt_model.py is not shipped in the zip.
 try:
     from ttt_model import TTTModel
 except Exception:  # pragma: no cover - base class is optional
     TTTModel = nn.Module  # type: ignore
-
-IN_STEP = 20
-CHANNELS = 3  # [u, v, p]
-
-
-class TinyForecaster(nn.Module):
-    """Minimal per-frame conv forecaster: (B, T, H, W, C) -> (B, T, H, W, C).
-
-    A residual around a 2-layer conv, so an untrained net starts near identity
-    (a persistence-like prior). Placeholder only -- swap in your own model.
-    """
-
-    def __init__(self, channels: int = CHANNELS, hidden: int = 16):
-        super().__init__()
-        self.conv1 = nn.Conv2d(channels, hidden, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(hidden, channels, kernel_size=3, padding=1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        b, t, h, w, c = x.shape
-        z = x.reshape(b * t, h, w, c).permute(0, 3, 1, 2)  # (B*T, C, H, W)
-        z = z + self.conv2(torch.relu(self.conv1(z)))       # residual
-        return z.permute(0, 2, 3, 1).reshape(b, t, h, w, c)
 
 
 class ReferenceTTTModel(TTTModel):
@@ -109,17 +89,22 @@ class ReferenceTTTModel(TTTModel):
         return pred_norm, {"adapt_loss": adapt_loss}
 
 
-def get_ttt_model(submission_dir: str, device: str):
+def get_ttt_model(
+    submission_dir: str,
+    device: str,
+    checkpoint_path: Optional[str] = None,
+):
     """Entry point called once by the evaluator (construction is not timed)."""
-    base = TinyForecaster()
+    ckpt_path = checkpoint_path or os.path.join(submission_dir, "model.pth")
+    if not os.path.isfile(ckpt_path):
+        raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
 
-    # Load your checkpoint if present. If you packed it with pack_ckpt_fp16.py,
-    # unpack here first (see that tool's docstring for the ``unpack_fp16`` helper).
-    ckpt_path = os.path.join(submission_dir, "model.pth")
-    if os.path.exists(ckpt_path):
-        state = torch.load(ckpt_path, map_location="cpu")
-        if isinstance(state, dict) and "model_state_dict" in state:
-            state = state["model_state_dict"]
-        base.load_state_dict(state)
+    if checkpoint_path is None:
+        # Packaged submissions rename their CNO checkpoint to model.pth, so the
+        # architecture cannot be inferred from the filename.
+        base, _ = load_baseline("cno", ckpt_path, device=device)
+    else:
+        # Local baseline checkpoint names contain cno/fno/transolver.
+        base, _ = load_baseline(ckpt_path, device=device)
 
     return ReferenceTTTModel(base, device)
