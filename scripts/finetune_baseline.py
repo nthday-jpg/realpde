@@ -49,9 +49,15 @@ def _cfg(key, default=None):
 
 
 def main():
+    # CNO3d always leaves one decoder_inv block out of the forward graph
+    # (loop uses indices 0..N_layers-1 of an N_layers+1 ModuleList when
+    # add_inv=True), so DDP needs find_unused_parameters=True. Single-GPU is
+    # unaffected.
+    from accelerate.utils import DistributedDataParallelKwargs
     accelerator = Accelerator(
         mixed_precision="fp16" if torch.cuda.is_available() else "no",
         log_with="wandb",
+        kwargs_handlers=[DistributedDataParallelKwargs(find_unused_parameters=True)],
     )
 
     data_path = str(_cfg("DATA_PATH", "data/train_sim"))
