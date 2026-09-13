@@ -15,6 +15,8 @@ Config variables (set in notebook or environment before launch):
     EPOCHS          : int   – number of epochs (default 50)
     BATCH_SIZE      : int   – local batch size (default 8)
     SUB_S           : int   – spatial subsample factor (default 2)
+    VAL_FRAC        : float – fraction of FILES held out for val (default 0.1)
+    SEED            : int   – seed for the trajectory split (default 42)
     SAVE_DIR        : str   – checkpoint output dir (default "checkpoints")
     WANDB_PROJECT   : str   – wandb project name (default "realpde-pretrain")
     WANDB_RUN_NAME  : str   – wandb run name (default auto)
@@ -30,7 +32,7 @@ import sys
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -39,7 +41,11 @@ for _p in (_SRC, _HERE):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from realpde.datasets import PDEDataset
+from realpde.datasets import (
+    PDEDataset,
+    file_window_counts,
+    trajectory_split_indices,
+)
 from realpde.models import get_model, ModelAdapter
 
 
@@ -94,11 +100,21 @@ def main():
 
     optimizer = torch.optim.Adam(base.parameters(), lr=lr)
 
-    # --- Data ------------------------------------------------------------------
+    # --- Data (split by TRAJECTORY/file, not by window) ------------------------
+    # Val files are fully unseen trajectories, so val measures generalization
+    # instead of memorizing nearby windows of seen trajectories.
+    val_frac = float(_cfg("VAL_FRAC", 0.1))
+    seed = int(_cfg("SEED", 42))
     full_dataset = PDEDataset(data_path, in_step=in_step, out_step=out_step,
                               interval=interval, sub_s=sub_s)
-    n_val = max(1, int(0.1 * len(full_dataset)))
-    train_ds, val_ds = random_split(full_dataset, [len(full_dataset) - n_val, n_val])
+    counts = file_window_counts(data_path, in_step, out_step, interval)
+    assert sum(n for _, n in counts) == len(full_dataset), \
+        "file counts disagree with dataset length"
+    train_idx, val_idx = trajectory_split_indices(counts, val_frac, seed)
+    train_ds, val_ds = Subset(full_dataset, train_idx), Subset(full_dataset, val_idx)
+    if accelerator.is_main_process:
+        print(f"[Split] {len(counts)} files -> train {len(train_idx)} windows / "
+              f"val {len(val_idx)} windows (by trajectory, seed={seed})")
 
     # --- DataLoader workers: use maximum sensible, allow override via NUM_WORKERS ---
     _num_workers_env = os.environ.get("NUM_WORKERS", "").strip()

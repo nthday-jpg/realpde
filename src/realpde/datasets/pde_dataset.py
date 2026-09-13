@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import random
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Tuple
@@ -132,3 +133,48 @@ class PDEDataset(Dataset):
 
     def __getitem__(self, idx: int) -> Tuple[torch.Tensor, torch.Tensor]:
         return self.inputs[idx], self.targets[idx]
+
+
+def file_window_counts(
+    data_dir: str | Path, in_step: int = 20, out_step: int = 20,
+    interval: int = 20,
+) -> List[Tuple[str, int]]:
+    """Windows per .h5 file, in the same sorted order PDEDataset loads.
+
+    Shape-only reads (no data loaded), so this is cheap. Files too short to
+    yield a window get count 0. The cumulative counts map 1:1 onto dataset
+    indices: file i owns ``[sum(counts[:i]), sum(counts[:i+1]))``.
+    """
+    data_dir = Path(data_dir)
+    h5_files = sorted(f for f in data_dir.iterdir() if f.suffix == ".h5")
+    if not h5_files:
+        raise FileNotFoundError(f"No .h5 files found in {data_dir}")
+    out: List[Tuple[str, int]] = []
+    for p in h5_files:
+        with h5py.File(p, "r") as f:
+            T = f["u"].shape[0]
+        n = len(range(0, T - in_step - out_step + 1, interval))
+        out.append((p.name, n))
+    return out
+
+
+def trajectory_split_indices(
+    counts: List[Tuple[str, int]], val_frac: float = 0.1, seed: int = 42,
+) -> Tuple[List[int], List[int]]:
+    """Train/val window indices split by FILE (trajectory), not by window.
+
+    Files are seeded-shuffled, the tail ``val_frac`` become the val set, and
+    all windows of a file stay together — so val measures generalization to
+    unseen trajectories instead of nearby windows of seen ones.
+    """
+    order = list(range(len(counts)))
+    random.Random(seed).shuffle(order)
+    n_val_files = max(1, int(val_frac * len(counts)))
+    val_files = set(order[:n_val_files])
+    train_idx: List[int] = []
+    val_idx: List[int] = []
+    base = 0
+    for i, (_, n) in enumerate(counts):
+        (val_idx if i in val_files else train_idx).extend(range(base, base + n))
+        base += n
+    return train_idx, val_idx

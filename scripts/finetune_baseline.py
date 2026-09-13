@@ -11,11 +11,12 @@ and comparing val curves.
 
 Config via env (set in notebook CONFIG cell):
     DATA_PATH       dir with .h5 files (train_sim or train_real)
+    DATA_CACHE      optional .pt from scripts/cache_dataset.py (skips .h5 reads)
     RESUME_CKPT     path to .pth to resume (shipped ckpt or prior run)
     MODEL_TYPE      auto-detected from filename if unset (cno/fno/transolver)
     IN_STEP/OUT_STEP/INTERVAL/SUB_S (default 20/20/20/2)
     LR (1e-4), EPOCHS (20), BATCH_SIZE (4), WEIGHT_DECAY (0)
-    VAL_FRAC (0.1), SEED (42), NUM_WORKERS (unset=auto)
+    VAL_FRAC (0.1 of FILES), SEED (42, trajectory split), NUM_WORKERS (unset=auto)
     SAVE_DIR (/kaggle/working/cno_continue)
     WANDB_PROJECT (realpde-finetune), WANDB_RUN_NAME (optional)
 
@@ -31,7 +32,7 @@ import sys
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
@@ -40,7 +41,11 @@ for _p in (os.path.join(_REPO, "src"), _REPO):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from realpde.datasets import PDEDataset
+from realpde.datasets import (
+    PDEDataset,
+    file_window_counts,
+    trajectory_split_indices,
+)
 from load_baseline import load_baseline, detect_model_type
 
 
@@ -77,11 +82,31 @@ def main():
     wandb_project = str(_cfg("WANDB_PROJECT", "realpde-finetune"))
     wandb_run = _cfg("WANDB_RUN_NAME", None)
 
-    g = torch.Generator().manual_seed(seed)
-    full = PDEDataset(data_path, in_step=in_step, out_step=out_step,
-                      interval=interval, sub_s=sub_s)
-    n_val = max(1, int(val_frac * len(full)))
-    train_ds, val_ds = random_split(full, [len(full) - n_val, n_val], generator=g)
+    data_cache = _cfg("DATA_CACHE", "")
+    if data_cache and os.path.exists(data_cache):
+        # Fast path: windows cached by scripts/cache_dataset.py (torch.load
+        # runs on each rank; file is on local disk so this is quick).
+        blob = torch.load(data_cache, map_location="cpu", weights_only=False)
+        full = torch.utils.data.TensorDataset(blob["inputs"], blob["targets"])
+        # file_counts saved by cache_dataset; older caches predate it -> recompute
+        # from DATA_PATH (cheap shape-only reads).
+        counts = ([tuple(c) for c in blob["file_counts"]] if "file_counts" in blob
+                  else file_window_counts(data_path, in_step, out_step, interval))
+        if accelerator.is_main_process:
+            print(f"[Data] loaded cache {data_cache}: {blob['n']} windows "
+                  f"(from {blob.get('data_path')})")
+    else:
+        full = PDEDataset(data_path, in_step=in_step, out_step=out_step,
+                          interval=interval, sub_s=sub_s)
+        counts = file_window_counts(data_path, in_step, out_step, interval)
+    # Split by TRAJECTORY/file: val files are fully unseen trajectories.
+    assert sum(n for _, n in counts) == len(full), \
+        "file counts disagree with dataset length (re-cache if knobs changed)"
+    train_idx, val_idx = trajectory_split_indices(counts, val_frac, seed)
+    train_ds, val_ds = Subset(full, train_idx), Subset(full, val_idx)
+    if accelerator.is_main_process:
+        print(f"[Split] {len(counts)} files -> train {len(train_idx)} windows / "
+              f"val {len(val_idx)} windows (by trajectory, seed={seed})")
 
     nw_env = os.environ.get("NUM_WORKERS", "").strip()
     if nw_env:
