@@ -1,9 +1,15 @@
 #!/usr/bin/env python3
 """Pretraining script for PDE velocity field models.
 
-Launch with ``accelerate launch trainer.py`` (config set in notebook globals
-before launch).  Supports teacher-forcing pretraining with configurable
-in/out step windows and multiple model architectures.
+Launch with ``accelerate launch scripts/trainer.py`` (config set in notebook
+or environment before launch).  Supports teacher-forcing pretraining with
+configurable in/out step windows and multiple model architectures.
+
+Models train in NORMALIZED space (per-channel Gaussian, same convention as
+``local_eval.py``): train stats are fit on train files only, val stats on val
+files only, so no val information leaks into training. Checkpoints carry both
+``norm_train``/``norm_val`` tuples plus ``SAVE_DIR/mean_std_{train,val}.pt``
+files in the official ``mean_std_*.pt`` layout.
 
 Config variables (set in notebook or environment before launch):
     DATA_PATH       : str   – path to directory with .h5 files
@@ -36,13 +42,14 @@ from torch.utils.data import DataLoader, Subset
 from tqdm.auto import tqdm
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
-_SRC = os.path.join(_HERE, "src")
-for _p in (_SRC, _HERE):
+_REPO = os.path.dirname(_HERE)  # scripts/ -> repo root
+for _p in (os.path.join(_REPO, "src"), _REPO):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
 from realpde.datasets import (
     PDEDataset,
+    PDENormalizer,
     file_window_counts,
     trajectory_split_indices,
 )
@@ -116,6 +123,23 @@ def main():
         print(f"[Split] {len(counts)} files -> train {len(train_idx)} windows / "
               f"val {len(val_idx)} windows (by trajectory, seed={seed})")
 
+    # --- Normalization (no leakage: each split fits its own stats) -----------
+    # Train stats see train windows only; val stats see val windows only.
+    # Loss is computed in normalized space; raw-space metrics need
+    # PDENormalizer.postprocess_pred (see scripts/eval_pretrain.py).
+    if accelerator.is_main_process:
+        print("[Norm] fitting per-split stats (train on train windows, "
+              "val on val windows) ...")
+    train_norm = PDENormalizer.fit_from_indexed(full_dataset, train_idx)
+    val_norm = PDENormalizer.fit_from_indexed(full_dataset, val_idx)
+    if accelerator.is_main_process:
+        print(f"[Norm] train {train_norm.describe()}")
+        print(f"[Norm] val   {val_norm.describe()}")
+        os.makedirs(save_dir, exist_ok=True)
+        train_norm.save(os.path.join(save_dir, "mean_std_train.pt"))
+        val_norm.save(os.path.join(save_dir, "mean_std_val.pt"))
+        print(f"[Norm] saved mean_std_train.pt / mean_std_val.pt -> {save_dir}/")
+
     # --- DataLoader workers: use maximum sensible, allow override via NUM_WORKERS ---
     _num_workers_env = os.environ.get("NUM_WORKERS", "").strip()
     if _num_workers_env != "":
@@ -178,6 +202,7 @@ def main():
         pbar = tqdm(train_loader, desc=f"Epoch {epoch:3d}", disable=not accelerator.is_main_process)
         for batch_idx, (inp, tgt) in enumerate(pbar):
             optimizer.zero_grad()
+            inp, tgt = train_norm.preprocess(inp, tgt)
             pred = base(inp)
             loss = F.mse_loss(pred, tgt)
             accelerator.backward(loss)
@@ -198,6 +223,7 @@ def main():
         val_pbar = tqdm(val_loader, desc="  Val  ", disable=not accelerator.is_main_process)
         with torch.no_grad():
             for inp, tgt in val_pbar:
+                inp, tgt = val_norm.preprocess(inp, tgt)
                 pred = base(inp)
                 batch_val = F.mse_loss(pred, tgt).item()
                 val_loss += batch_val
@@ -209,26 +235,33 @@ def main():
                              "epoch": epoch}, step=global_step)
             print(f"Epoch {epoch:3d} | train {avg_train:.6f} | val {avg_val:.6f}")
 
+            norm_blobs = {"norm_train": train_norm.as_tuple(),
+                          "norm_val": val_norm.as_tuple()}
+
             # Save best checkpoint
             if avg_val < best_val_loss:
                 best_val_loss = avg_val
                 unwrapped = accelerator.unwrap_model(base)
                 state = {"model_state_dict": unwrapped.state_dict(),
-                         "epoch": epoch, "val_loss": avg_val, "cfg": cfg}
+                         "epoch": epoch, "val_loss": avg_val, "cfg": cfg,
+                         **norm_blobs}
                 torch.save(state, os.path.join(save_dir, "best.pth"))
 
             # Save latest checkpoint every 5 epochs
             if (epoch + 1) % 5 == 0:
                 unwrapped = accelerator.unwrap_model(base)
                 state = {"model_state_dict": unwrapped.state_dict(),
-                         "epoch": epoch, "val_loss": avg_val, "cfg": cfg}
+                         "epoch": epoch, "val_loss": avg_val, "cfg": cfg,
+                         **norm_blobs}
                 torch.save(state, os.path.join(save_dir, f"epoch_{epoch:03d}.pth"))
 
     # --- Final save ------------------------------------------------------------
     if accelerator.is_main_process:
         unwrapped = accelerator.unwrap_model(base)
         state = {"model_state_dict": unwrapped.state_dict(),
-                 "epoch": epochs - 1, "val_loss": avg_val, "cfg": cfg}
+                 "epoch": epochs - 1, "val_loss": avg_val, "cfg": cfg,
+                 "norm_train": train_norm.as_tuple(),
+                 "norm_val": val_norm.as_tuple()}
         torch.save(state, os.path.join(save_dir, "final.pth"))
         accelerator.end_training()
         print(f"Training complete. Best val loss: {best_val_loss:.6f}")

@@ -45,6 +45,7 @@ for _p in (os.path.join(_REPO, "src"), _REPO):
 
 from realpde.datasets import (
     PDEDataset,
+    PDENormalizer,
     file_window_counts,
     trajectory_split_indices,
 )
@@ -95,6 +96,11 @@ def _test_on_real(real_data, continued_ckpt, before_ckpt, model_type,
                          interval=interval, sub_s=sub_s)
     loader = _DataLoader(eval_ds, batch_size=eval_batch, shuffle=False)
     print(f"[RealTest] {len(eval_ds)} windows, batch={eval_batch}")
+    # Eval-split stats (fit on this staged real subset only — no train leakage);
+    # models run normalized, scores are denormalized to raw space.
+    from realpde.datasets import PDENormalizer as _PDN
+    _norm = _PDN.fit_from_indexed(eval_ds, range(len(eval_ds)))
+    print(f"[RealTest] norm {_norm.describe()}")
 
     accelerator.free_memory()  # drop train model/opt before loading eval models
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
@@ -105,11 +111,12 @@ def _test_on_real(real_data, continued_ckpt, before_ckpt, model_type,
         ms, rs, n = 0.0, 0.0, 0
         with torch.no_grad():
             for inp, tgt in loader:
-                inp, tgt = inp.to(device), tgt.to(device)
-                pred = m(inp)
-                ms += F.mse_loss(pred, tgt, reduction="sum").item()
-                b = pred.shape[0]
-                p, t = pred.reshape(b, -1), tgt.reshape(b, -1)
+                inp_raw, tgt_raw = inp.to(device), tgt.to(device)
+                inp_n, tgt_n = _norm.preprocess(inp_raw, tgt_raw)
+                pred_raw = _norm.postprocess_pred(m(inp_n))
+                ms += F.mse_loss(pred_raw, tgt_raw, reduction="sum").item()
+                b = pred_raw.shape[0]
+                p, t = pred_raw.reshape(b, -1), tgt_raw.reshape(b, -1)
                 rs += ((p - t).norm(dim=1)
                        / t.norm(dim=1).clamp_min(1e-8)).sum().item()
                 n += b
@@ -170,6 +177,7 @@ def main():
             print(f"[Data] loaded cache {data_cache}: {blob['n']} windows "
                   f"(from {blob.get('data_path')})")
     else:
+        blob = None
         full = PDEDataset(data_path, in_step=in_step, out_step=out_step,
                           interval=interval, sub_s=sub_s)
         counts = file_window_counts(data_path, in_step, out_step, interval)
@@ -178,6 +186,18 @@ def main():
         "file counts disagree with dataset length (re-cache if knobs changed)"
     train_idx, val_idx = trajectory_split_indices(counts, val_frac, seed)
     train_ds, val_ds = Subset(full, train_idx), Subset(full, val_idx)
+    # Per-split normalization (no leakage): train stats on train windows only,
+    # val stats on val windows only. Baselines train in normalized space.
+    if blob is not None:
+        ins, tgts = blob["inputs"], blob["targets"]
+        train_norm = PDENormalizer.fit_from_samples(ins[train_idx], tgts[train_idx])
+        val_norm = PDENormalizer.fit_from_samples(ins[val_idx], tgts[val_idx])
+    else:
+        train_norm = PDENormalizer.fit_from_indexed(full, train_idx)
+        val_norm = PDENormalizer.fit_from_indexed(full, val_idx)
+    if accelerator.is_main_process:
+        print(f"[Norm] train {train_norm.describe()}")
+        print(f"[Norm] val   {val_norm.describe()}")
     if accelerator.is_main_process:
         print(f"[Split] {len(counts)} files -> train {len(train_idx)} windows / "
               f"val {len(val_idx)} windows (by trajectory, seed={seed})")
@@ -246,6 +266,7 @@ def main():
                     disable=not accelerator.is_main_process, leave=False)
         for inp, tgt in pbar:
             opt.zero_grad(set_to_none=True)
+            inp, tgt = train_norm.preprocess(inp, tgt)
             loss = F.mse_loss(model(inp), tgt)
             accelerator.backward(loss)
             opt.step()
@@ -261,6 +282,7 @@ def main():
         vt = 0.0
         with torch.no_grad():
             for inp, tgt in val_loader:
+                inp, tgt = val_norm.preprocess(inp, tgt)
                 vt += F.mse_loss(model(inp), tgt).item()
         # average across processes
         vt_t = torch.tensor([vt, len(val_loader)], device=accelerator.device)
@@ -278,7 +300,9 @@ def main():
                      "epoch": epoch, "val_loss": val_loss, "train_loss": train_loss,
                      "cfg": dict(in_step=in_step, out_step=out_step, interval=interval,
                                  sub_s=sub_s, lr=lr, model_type=model_type),
-                     "resume_from": resume}
+                     "resume_from": resume,
+                     "norm_train": train_norm.as_tuple(),
+                     "norm_val": val_norm.as_tuple()}
             torch.save(state, os.path.join(save_dir, "last.pth"))
             if val_loss < best_val:
                 best_val = val_loss
@@ -291,7 +315,11 @@ def main():
         state = {"model_state_dict": {k: v.cpu() for k, v in unwrapped.state_dict().items()},
                  "optimizer_state_dict": opt.state_dict(),
                  "epoch": end_epoch - 1, "val_loss": val_loss,
-                 "cfg": dict(model_type=model_type), "resume_from": resume}
+                 "cfg": dict(model_type=model_type), "resume_from": resume,
+                 "norm_train": train_norm.as_tuple(),
+                 "norm_val": val_norm.as_tuple()}
+        train_norm.save(os.path.join(save_dir, "mean_std_train.pt"))
+        val_norm.save(os.path.join(save_dir, "mean_std_val.pt"))
         torch.save(state, os.path.join(save_dir, "final.pth"))
         print(f"Done. best val {best_val:.6f} -> {save_dir}/best.pth")
 
