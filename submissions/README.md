@@ -22,8 +22,21 @@ its root. `model.pth` is never committed (see `.gitignore`).
 - `submission_v2_cno.zip` (v2 + `sim_real_cno.pth`, `base_model: cno`): example_data smoke rel-L2 81.7 / final 60.2 on CPU (time_score not meaningful locally; GPU eval will differ). Zip ~30MB, under cap.
 - `submission_v3_cno.zip` (v3 + `sim_real_cno.pth`): example_data smoke rel-L2 82.6 / final 63.2 on CPU, 8.5s/step (10x faster than v2's 86s/step — the cost of 5 adapt steps). Zip ~30MB, under cap.
 
-## Leaderboard (Codabench, real `test_real`)
+## Local runs (`local_eval.py --data ./example_data`, synthetic, NOT leaderboard-comparable)
 
+### v3, TinyForecaster fallback (no `model.pth`, CPU)
+
+| rel_l2 | tke | mvpe | time | sps | final | per-step |
+|---|---|---|---|---|---|
+| 79.514 | 78.456 | 88.270 | 67.385 | 50.513 | 72.828 | 171ms |
+
+### v3 + `sim_real_cno.pth` (unzipped `submission_v3_cno.zip`, CPU)
+
+| rel_l2 | tke | mvpe | time | sps | final | per-step |
+|---|---|---|---|---|---|
+| 82.645 | 69.734 | 90.362 | 22.625 | 50.521 | 63.178 | 8.5s |
+
+## Leaderboard (Codabench, real `test_real`)
 ### `submission_v3_cno.zip` — v3 CNO, no adaptation (2026-09-16)
 
 | rel_l2 | tke | mvpe | time | sps | final |

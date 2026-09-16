@@ -147,11 +147,13 @@ def main() -> None:
                     help="directory containing submission.py (default: this kit)")
     ap.add_argument("--data", default=str(HERE / "example_data"),
                     help="example_data directory (default: ./example_data)")
+    ap.add_argument("--device", default="cpu",
+                    help="torch device for the submission model (default: cpu; use cuda on Kaggle GPU)")
     args = ap.parse_args()
 
     submission_dir = Path(args.submission).resolve()
     data_dir = Path(args.data).resolve()
-    device = "cpu"
+    device = args.device
 
     stats_path = data_dir / "mean_std_real.pt"
     if not stats_path.exists():
