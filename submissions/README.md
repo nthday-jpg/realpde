@@ -21,6 +21,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 
 - `submission_v2_cno.zip` (v2 + `sim_real_cno.pth`, `base_model: cno`): example_data smoke rel-L2 81.7 / final 60.2 on CPU (time_score not meaningful locally; GPU eval will differ). Zip ~30MB, under cap.
 - `submission_v3_cno.zip` (v3 + `sim_real_cno.pth`): example_data smoke rel-L2 82.6 / final 63.2 on CPU, 8.5s/step (10x faster than v2's 86s/step — the cost of 5 adapt steps). Zip ~30MB, under cap.
+- Contract decision (2026-09-16): checked `submission_template.py` @ `959849f` (init) — the reference returns `pred_norm` on `self.device` with no input-device transfer, and `local_eval.py` hardcodes CPU. Reverted all deviations: kit files (`local_eval.py`, `submission.py`, `submission_template.py`, `agentic_demo/`) are pristine, and v1/v2/v3 return exactly per template. Consequence: `local_eval` runs CPU-only everywhere, so the Kaggle real-30 CNO run takes ~40+ min (reduce `--frames` for iteration).
 
 ## Local runs (`local_eval.py --data ./example_data`, synthetic, NOT leaderboard-comparable)
 

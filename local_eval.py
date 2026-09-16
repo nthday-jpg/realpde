@@ -96,11 +96,19 @@ class Normalizer:
     """Minimal GaussianNormalizer: affine per-channel, std==0 -> 1."""
 
     def __init__(self, stats_path: Path):
-        mi, mt, si, st = torch.load(stats_path, weights_only=False)
+        mi, mt, si, st = torch.load(stats_path, map_location="cpu", weights_only=False)
         one = torch.ones_like
         self.mean_in, self.mean_tgt = mi.float(), mt.float()
         self.std_in = torch.where(si == 0, one(si), si).float()
         self.std_tgt = torch.where(st == 0, one(st), st).float()
+
+    def to(self, device) -> "Normalizer":
+        """Move stats to the eval device (same device the model predicts on)."""
+        self.mean_in = self.mean_in.to(device)
+        self.mean_tgt = self.mean_tgt.to(device)
+        self.std_in = self.std_in.to(device)
+        self.std_tgt = self.std_tgt.to(device)
+        return self
 
     def preprocess(self, x, y):
         c1, c2 = x.shape[-1], y.shape[-1]
@@ -160,7 +168,7 @@ def main() -> None:
         raise SystemExit(f"Missing {stats_path}. Run example_data/make_example.py first.")
 
     stream = build_stream(data_dir)
-    normalizer = Normalizer(stats_path)
+    normalizer = Normalizer(stats_path).to(device)
     n_traj = len({s["sim_id"] for s in stream})
     print(f"[local_eval] {len(stream)} steps over {n_traj} trajectories, batch size 1")
 
@@ -175,8 +183,8 @@ def main() -> None:
     expected_shape = None
 
     for step in stream:
-        inp = step["input"].unsqueeze(0)     # (1, 20, 32, 64, 3)
-        tgt = step["target"].unsqueeze(0)
+        inp = step["input"].unsqueeze(0).to(device)     # (1, 20, 32, 64, 3)
+        tgt = step["target"].unsqueeze(0).to(device)
 
         if step["is_first"]:
             model.reset_ttt_state()          # untimed
