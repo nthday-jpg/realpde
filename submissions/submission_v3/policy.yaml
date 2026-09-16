@@ -1,0 +1,5 @@
+# v3 knobs (only the base-model hint; there is no adaptation to tune).
+# Resolution order: this file > BASE_MODEL env > default "cno".
+# Needed because the staged checkpoint is renamed to model.pth,
+# which carries no architecture hint for load_baseline.
+base_model: cno

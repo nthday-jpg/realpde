@@ -15,7 +15,19 @@ its root. `model.pth` is never committed (see `.gitignore`).
 |---|---|---|---|---|---|
 | `submission_v1` | TinyForecaster / `model.pth` | ref 1-step SGD (`ReferenceTTTModel`) | rel-L2 78.6, 389ms/step, final 71.0 | 5KB (no ckpt) | evaluated (smoke) |
 | `submission_v2` | TinyForecaster / baseline via `load_baseline` | bounded controller (`rule` default) | rel-L2 71.9, 181ms/step, final 64.9 | ~0.6MB (no ckpt) | evaluated (smoke) |
+| `submission_v3` | CNO via `load_baseline` | none (predict-only) | rel-L2 82.6, 8.5s/step CPU, final 63.2 | ~30MB (with ckpt) | ✅ submitted — Codabench final 72.84 (see Leaderboard below) |
 
 ## Changelog
 
-- _Fill after each eval, e.g._ `v1 + sim_real_cno.pth: rel_l2_score 61.2, time 12ms, 33MB — submitted as v1.zip`
+- `submission_v2_cno.zip` (v2 + `sim_real_cno.pth`, `base_model: cno`): example_data smoke rel-L2 81.7 / final 60.2 on CPU (time_score not meaningful locally; GPU eval will differ). Zip ~30MB, under cap.
+- `submission_v3_cno.zip` (v3 + `sim_real_cno.pth`): example_data smoke rel-L2 82.6 / final 63.2 on CPU, 8.5s/step (10x faster than v2's 86s/step — the cost of 5 adapt steps). Zip ~30MB, under cap.
+
+## Leaderboard (Codabench, real `test_real`)
+
+### `submission_v3_cno.zip` — v3 CNO, no adaptation (2026-09-16)
+
+| rel_l2 | tke | mvpe | time | sps | final |
+|---|---|---|---|---|---|
+| 94.514 | 73.804 | 93.099 | 86.658 | 15.869 | **72.837** |
+
+Frozen fine-tuned CNO is strong on point/probe accuracy (rel-L2 94.5, MVPE 93.1) and fast (time 86.7), but SPS 15.9 drags the mean — the default ±5%-magnitude interval is far too narrow for frozen point predictions. Takeaway: keep the CNO base, add calibrated uncertainty intervals (SPS fix) before spending budget on weight adaptation.
