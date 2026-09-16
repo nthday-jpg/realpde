@@ -1,0 +1,9 @@
+# v4 knobs: base-model hint + calibration table settings.
+# Resolution for base_model: this file > BASE_MODEL env > default "cno".
+# Needed because the staged checkpoint is renamed to model.pth,
+# which carries no architecture hint for load_baseline.
+base_model: cno
+# Residual quantile level: nominal per-step coverage of the interval table.
+coverage: 0.90
+# Previous (pred, target) windows kept in the residual table.
+history: 5

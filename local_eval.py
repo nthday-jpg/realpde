@@ -179,6 +179,7 @@ def main() -> None:
             raise SystemExit(f"get_ttt_model() returned an object lacking {attr}().")
 
     per_step_times, preds, tgts = [], [], []
+    lo_raw, hi_raw = [], []  # per-step denormalized bounds (None when unreturned)
     prev_pair = None  # (inp_norm, tgt_norm) of the previous step
     expected_shape = None
 
@@ -212,6 +213,17 @@ def main() -> None:
         pred_raw = normalizer.postprocess_pred(pred_norm.detach())
         preds.append(pred_raw.squeeze(0).cpu().numpy().astype(np.float32))
         tgts.append(tgt.squeeze(0).cpu().numpy().astype(np.float32))
+        # Optional calibration bounds (normalized space, model device):
+        # denormalize like the prediction; shape mismatch -> treat as absent.
+        for key, buf in (("lower", lo_raw), ("upper", hi_raw)):
+            bnd = info.get(key) if isinstance(info, dict) else None
+            if bnd is not None:
+                bnd = torch.as_tensor(bnd)
+            if bnd is not None and tuple(bnd.shape) == expected_shape:
+                buf.append(normalizer.postprocess_pred(bnd.detach().to(device))
+                           .squeeze(0).cpu().numpy().astype(np.float32))
+            else:
+                buf.append(None)
 
     pred_all = np.stack(preds, axis=0)
     tgt_all = np.stack(tgts, axis=0)
@@ -232,7 +244,24 @@ def main() -> None:
         rl = float(np.mean(official.rel_l2_per_sample(pred_all, tgt_all, c)))
         tk = float(np.mean(official.tke_rel_l2_per_sample(pred_all, tgt_all, c)))
         mv = official.mvpe_rel_l2(pred_all, tgt_all)
-        sps, _cov = official.aggregate_sps(pred_all, tgt_all, c)
+        n_cal = sum(b is not None for b in lo_raw)
+        if n_cal:
+            # Steps without returned bounds get the scorer's default ±5% band,
+            # so partially-calibrated runs still score the returned intervals.
+            lo_all, hi_all = [], []
+            for step_pred, lob, hib in zip(pred_all, lo_raw, hi_raw):
+                if lob is not None and hib is not None:
+                    lo_all.append(lob); hi_all.append(hib)
+                else:
+                    band = 0.05 * np.abs(step_pred)
+                    lo_all.append(step_pred - band); hi_all.append(step_pred + band)
+            print(f"[local_eval] scoring SPS with submission intervals "
+                  f"({n_cal}/{len(stream)} steps; rest default band)")
+            sps, _cov = official.aggregate_sps(
+                pred_all, tgt_all, c,
+                lower=np.stack(lo_all, axis=0), upper=np.stack(hi_all, axis=0))
+        else:
+            sps, _cov = official.aggregate_sps(pred_all, tgt_all, c)
         subscores = {
             "rel_l2_score": official.score_error(rl),
             "tke_score": official.score_error(tk),
