@@ -1,3 +1,9 @@
+# Checkpoints & submission artifacts (never commit weights/zips)
+model.pth
+submissions/*/model.pth
+checkpoints/
+dist/
+
 # Python-generated files
 __pycache__/
 *.py[oc]
