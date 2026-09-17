@@ -1,0 +1,16 @@
+# v7 knobs: base-model hint + EMA calibration settings.
+# Resolution for base_model: this file > BASE_MODEL env > default "cno".
+# Needed because the staged checkpoint is renamed to model.pth,
+# which carries no architecture hint for load_baseline.
+base_model: cno
+# Residual quantile level: nominal per-step coverage of the EMA table.
+coverage: 0.90
+# First T time-frames of each window entering the per-step quantile (T=20, default 5).
+table_frames: 5
+# Relative half-width used before the first EMA update (trajectory start)
+# so bounds are returned on every step. 0.05 mirrors the scorer's default band.
+fallback_frac: 0.05
+# EMA weight on the current step's quantile (effective window ~1/alpha steps).
+# 1.0 = memoryless (current-step q only). Override at pack time with
+# --set ema_alpha=0.30 (no code edit needed).
+ema_alpha: 0.30
