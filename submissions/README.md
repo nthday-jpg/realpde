@@ -32,7 +32,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 - Contract decision (2026-09-16): checked `submission_template.py` @ `959849f` (init) — the reference returns `pred_norm` on `self.device` with no input-device transfer. All shipped submissions honor that; device handling lives harness-side only (`local_eval.py --device` + stats/tensors `.to(device)`, numerically neutral, timed region untouched).
 - v4 + harnessed bounds (2026-09-16): `submission_v4` returns `info["lower"/"upper"]` (normalized, per metrics.md's "if you do not return lower/upper arrays" clause); `local_eval.py` now collects, denormalizes, and scores them (missing steps fall back to the default band per-step). `submission_v4_cno.zip` smoke: rel-L2 82.6 / sps 51.8 (vs v3's 50.5 default) / final 63.2 on example_data. Next: Kaggle real-30 GPU run via notebook (`VARIANT='submission_v4'`).
 - v5 relative calibration (2026-09-16): `submission_v5` scales the band by local magnitude (`rel_res = abs(t-p)/(abs(p)+1e-6)`, `width = q90*abs(pred)`). `submission_v5_cno.zip` smoke: sps 50.9 / final 63.3 on example_data — toy set too small to separate v4/v5; real-30 GPU run decides.
-- v6 fixed-band probe (2026-09-17): `submission_v6` = v3 frozen CNO + fixed `pred ± bound_frac*|pred|` on every step (`bound_frac: 0.05` reproduces the scorer default; `--set bound_frac=` overrides at pack time, no code edit). Minimal test of "is the default too narrow". Sweep/pack via `notebook/sps_bound_kaggle.ipynb`.
+- v6 fixed-band probe (2026-09-17): `submission_v6` = v3 frozen CNO + fixed `pred ± bound_frac*|pred|` on every step (`bound_frac: 0.05` reproduces the scorer default; `--set bound_frac=` overrides at pack time, no code edit). Minimal test of "is the default too narrow". Sweep/pack via `notebook/sps_bound_kaggle.ipynb` (removed 2026-09-19; sweeps now via `local_eval.py --json-out`, symmetry probe in `notebook/eval_kaggle.ipynb`).
 - v7 EMA band (2026-09-18): `submission_v7` = v4's absolute band with infinite memory (`ema = alpha*q + (1-alpha)*ema`, `alpha=1` memoryless). Calibration-only bench (fake tensors, no forward): v7 18.1 vs v4 52.1 ms/step — ~3× cheaper (quantile dominates; v4 sorts 2 windows, v7 one).
 - v8 speed-conditioned band (2026-09-18): `submission_v8` bins residuals by `|prev_pred|` magnitude (quantile edges, `n_bins: 10`), per-channel q90 per bin, linear-interp at each current pixel's speed. No EMA. Direct test of the `C(s)` miscalibration diagnosis.
 - v9/v10 adaptation ladder (2026-09-18): `submission_v9` = reference 1-step SGD on all weights (no bounds); `submission_v10` = same + v4 band. v3 → v9 → v10 isolates adaptation, then calibration.
@@ -80,7 +80,7 @@ LoRA path end-to-end (36 Conv3d wrapped, 329,616 adapter params, 1-step SGD on a
 
 Caveats: stats were fit on the same 30 trajectories (self-normalized, not official `mean_std_real.pt`); trajectories truncated to 200 frames. Still, the pattern matches Codabench: accuracy excellent, SPS (54.5, default ±5% band) the clear laggard → motivates v4 calibration.
 
-### v6 width sweep on real-30 (2026-09-17, Kaggle GPU, `notebook/sps_bound_kaggle.ipynb`)
+### v6 width sweep on real-30 (2026-09-17, Kaggle GPU — probe notebook since removed, results kept)
 
 Same frozen CNO, fixed normalized-space bands `predn ± w*|predn|`, official SPS (§4 == §5 exactly):
 
