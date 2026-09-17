@@ -1,0 +1,8 @@
+# v9 knobs: base-model hint + adaptation learning rate.
+# Resolution for base_model: this file > BASE_MODEL env > default "cno".
+# Needed because the staged checkpoint is renamed to model.pth,
+# which carries no architecture hint for load_baseline.
+base_model: cno
+# SGD learning rate for the single per-step gradient update.
+# Override at pack time with --set ttt_lr=0.0005 (no code edit needed).
+ttt_lr: 0.001
