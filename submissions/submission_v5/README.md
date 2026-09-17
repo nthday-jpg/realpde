@@ -1,9 +1,9 @@
 # submission_v5 — CNO + online relative-q90 calibration
 
 - **Adaptation:** none on weights (frozen CNO, `adapt_loss: None` always).
-- **Calibration:** magnitude-scaled band — `rel_res = |prev_target - prev_pred| / (|prev_pred| + 1e-6)`,
+- **Calibration:** magnitude-scaled band — `rel_res = abs(prev_target - prev_pred) / (abs(prev_pred) + 1e-6)`,
   per-channel `q90 = quantile(rel_res, 0.90)` over the last `history` windows,
-  `width = q90 * |pred|`, `lower/upper = pred ∓/± width`. Wide where flow is
+  `width = q90 * abs(pred)`, `lower/upper = pred ∓/± width`. Wide where flow is
   fast, tight near stagnation (v4's absolute band can't do this).
 - **Base model / shared files / smoke test:** same as v4 (`model.pth` via
   `load_baseline`, `TinyForecaster` fallback, `ttt_model.py` +

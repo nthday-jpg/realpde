@@ -2,7 +2,7 @@
 
 - **Adaptation:** none on weights (frozen CNO, `adapt_loss: None` always).
 - **Calibration:** per-step table lookup on the revealed previous pair —
-  `residual = |prev_target - prev_pred|`, per-channel `q90 = quantile(residual, 0.90)`
+  `residual = abs(prev_target - prev_pred)`, per-channel `q90 = quantile(residual, 0.90)`
   over the last `history` windows, `lower/upper = pred ∓/± q90` for the current
   prediction. Bounds ride in `info["lower"/"upper"]` (normalized space); first
   step omits them (scorer default applies).

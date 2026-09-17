@@ -11,7 +11,7 @@ Promoted from `agentic_demo/submission.py` (`AgenticTTTModel` + `policy.yaml`).
   `mode: llm` uses the organizer gateway with rule fallback; `mode: fixed`
   pins `fixed_action` (e.g. `skip_update` = no-adapt ablation).
 - **Base model:** `TinyForecaster` fallback; loads `model.pth` as a baseline
-  checkpoint via `load_baseline` (`base_model: cno|fno|transolver` in
+  checkpoint via `load_baseline` (`base_model` one of `cno`, `fno`, `transolver` in
   `policy.yaml` when the filename carries no architecture hint).
 - **Knobs:** edit `policy.yaml` offline, ship the tuned file.
 - **Shared files (injected at pack time, not stored here):** `ttt_model.py`,
