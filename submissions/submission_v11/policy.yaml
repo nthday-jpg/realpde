@@ -1,0 +1,12 @@
+# v11 knobs: base-model hint + adaptation + LoRA geometry.
+# Resolution for base_model: this file > BASE_MODEL env > default "cno".
+# Needed because the staged checkpoint is renamed to model.pth,
+# which carries no architecture hint for load_baseline.
+base_model: cno
+# SGD learning rate for the single per-step update (LoRA params only).
+ttt_lr: 0.001
+# Adapter rank (trainable params per conv ~= r*in*k^3 + out*r).
+# Sweep at pack time with --set lora_rank=8 (no code edit needed).
+lora_rank: 4
+# Adapter scale is lora_alpha / lora_rank (B is zero-initialized).
+lora_alpha: 8.0
