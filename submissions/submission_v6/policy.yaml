@@ -1,0 +1,10 @@
+# v6 knobs: base-model hint + fixed relative half-width.
+# Resolution for base_model: this file > BASE_MODEL env > default "cno".
+# Needed because the staged checkpoint is renamed to model.pth,
+# which carries no architecture hint for load_baseline.
+base_model: cno
+# Fixed interval half-width as a fraction of |pred| (normalized units):
+# 0.05 reproduces the scorer's default ±5% band; try 0.10 / 0.20 / 0.30
+# to test whether the default is too narrow. Override at pack time with
+# --set bound_frac=0.20 (no code edit needed).
+bound_frac: 0.05

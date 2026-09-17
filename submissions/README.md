@@ -18,6 +18,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 | `submission_v3` | CNO via `load_baseline` | none (predict-only) | rel-L2 82.6, 8.5s/step CPU, final 63.2 | ~30MB (with ckpt) | ✅ submitted — Codabench final 72.84 (see Leaderboard below) |
 | `submission_v4` | CNO via `load_baseline` | none + online q90 calibration | rel-L2 82.6, sps 51.8 (calibrated 2/4 steps), final 63.2 | ~30MB (with ckpt) | evaluated (smoke, see Local runs) |
 | `submission_v5` | CNO via `load_baseline` | none + online relative-q90 | rel-L2 82.6, sps 50.9 (calibrated 2/4 steps), final 63.3 | ~30MB (with ckpt) | evaluated (smoke, see Local runs) |
+| `submission_v6` | CNO via `load_baseline` | none + fixed `pred ± bound_frac*|pred|` every step | rel-L2 77.6, sps 50.4 (4/4 steps, default w), final 72.0 | ~30MB (with ckpt) | smoke OK, see Local runs |
 
 ## Changelog
 
@@ -26,6 +27,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 - Contract decision (2026-09-16): checked `submission_template.py` @ `959849f` (init) — the reference returns `pred_norm` on `self.device` with no input-device transfer. All shipped submissions honor that; device handling lives harness-side only (`local_eval.py --device` + stats/tensors `.to(device)`, numerically neutral, timed region untouched).
 - v4 + harnessed bounds (2026-09-16): `submission_v4` returns `info["lower"/"upper"]` (normalized, per metrics.md's "if you do not return lower/upper arrays" clause); `local_eval.py` now collects, denormalizes, and scores them (missing steps fall back to the default band per-step). `submission_v4_cno.zip` smoke: rel-L2 82.6 / sps 51.8 (vs v3's 50.5 default) / final 63.2 on example_data. Next: Kaggle real-30 GPU run via notebook (`VARIANT='submission_v4'`).
 - v5 relative calibration (2026-09-16): `submission_v5` scales the band by local magnitude (`rel_res = abs(t-p)/(abs(p)+1e-6)`, `width = q90*abs(pred)`). `submission_v5_cno.zip` smoke: sps 50.9 / final 63.3 on example_data — toy set too small to separate v4/v5; real-30 GPU run decides.
+- v6 fixed-band probe (2026-09-17): `submission_v6` = v3 frozen CNO + fixed `pred ± bound_frac*|pred|` on every step (`bound_frac: 0.05` reproduces the scorer default; `--set bound_frac=` overrides at pack time, no code edit). Minimal test of "is the default too narrow". Smoke (TinyForecaster fallback): sps 50.36 / final 72.04, bounds on 4/4 steps. Sweep/pack via `notebook/sps_bound_kaggle.ipynb`.
 
 ## Local runs (`local_eval.py --data ./example_data`, synthetic, NOT leaderboard-comparable)
 
@@ -68,6 +70,14 @@ Same frozen point predictions as v3 (accuracy identical); SPS 51.8 vs 50.5 from 
 | rel_l2 | tke | mvpe | time | sps | final | per-step |
 |---|---|---|---|---|---|---|
 | 82.645 | 69.734 | 90.362 | 22.894 | 50.862 | 63.300 | 8.3s |
+
+### v6, TinyForecaster fallback (no `model.pth`, CPU)
+
+| rel_l2 | tke | mvpe | time | sps | final | per-step |
+|---|---|---|---|---|---|---|
+| 77.641 | 77.796 | 87.566 | 66.829 | 50.358 | 72.038 | 180ms |
+
+Bounds on 4/4 steps (all-or-none satisfied, `bound_frac: 0.05` = scorer default width). Width sweep on example_data (normalized-space bands, `§4 == §5` exactly): 0.05 → 50.29, 0.10 → 50.55, 0.20 → 50.98, 0.30 → 51.33, 0.50 → 51.79 — wider wins directionally; real-30 GPU run in `notebook/sps_bound_kaggle.ipynb` decides the pack width.
 
 ## Staged real-data runs (Kaggle GPU, `scripts/stage_real30.py` 30 traj / seed 42 — diagnostic, NOT leaderboard)
 
