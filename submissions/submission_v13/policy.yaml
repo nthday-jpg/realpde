@@ -1,0 +1,18 @@
+# v13 knobs: base-model hint + frozen-band settings.
+# Resolution for base_model: this file > BASE_MODEL env > default "cno".
+# Needed because the staged checkpoint is renamed to model.pth,
+# which carries no architecture hint for load_baseline.
+base_model: fno
+# Residual quantile level: nominal per-step coverage of the frozen band.
+coverage: 0.90
+# Previous (pred, target) windows kept in the table during warmup.
+history: 2
+# First T time-frames of each window kept in the table (T=20, default 5).
+table_frames: 5
+# Revealed pairs seen before the band freezes
+# (run-level count, survives trajectory resets). 5 windows x 15 frames x 32 x 64
+# pixels is ~300k samples per channel — plenty for a stable q90.
+warmup_windows: 5
+# Relative half-width used when the residual table is empty (trajectory start)
+# so bounds are returned on every step. 0.05 mirrors the scorer's default band.
+fallback_frac: 0.05
