@@ -149,28 +149,128 @@ def rel_l2(pred: np.ndarray, target: np.ndarray, c: int) -> float:
     return float(np.mean(np.linalg.norm(p - t, axis=1) / denom))
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--submission", default=str(HERE),
-                    help="directory containing submission.py (default: this kit)")
-    ap.add_argument("--data", default=str(HERE / "example_data"),
-                    help="example_data directory (default: ./example_data)")
-    ap.add_argument("--device", default="cpu",
-                    help="torch device for the submission model (default: cpu; use cuda on Kaggle GPU)")
-    args = ap.parse_args()
+# --------------------------------------------------------------------------- #
+# SPS component breakdown (single source of truth for the notebook).
+# --------------------------------------------------------------------------- #
+# Must mirror scoring.py::aggregate_sps defaults (scorer default band,
+# normalize_factor, dm/tke/mvpe weights). The *scored* (sps_raw, coverage)
+# always comes from official.aggregate_sps itself so logging can never drift
+# from the leaderboard; the branch/nil values below reuse the same official
+# per-sample helpers purely for diagnosis.
+SPS_NORMALIZE_FACTOR = 0.5
+SPS_WEIGHT_DM = 0.5
+SPS_WEIGHT_TKE = 0.3
+SPS_WEIGHT_MVPE = 0.2
+SPS_DEFAULT_HALF_FRAC = 0.05  # scorer default band: pred +/- 0.05*|pred|
 
-    submission_dir = Path(args.submission).resolve()
-    data_dir = Path(args.data).resolve()
-    device = args.device
 
+def _official_scoring():
+    """Import the bundled scoring.py (authoritative SPS formulas)."""
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+    import scoring as official
+    return official
+
+
+def resolve_sps_bands(pred_all: np.ndarray, lo_raw, hi_raw):
+    """Resolve per-step bounds to full stacks with scorer-default fallback.
+
+    Steps without returned bounds get the scorer's default +/-5% band, same
+    as the official evaluator. Returns (lower, upper, n_calibrated).
+    """
+    lo_all, hi_all = [], []
+    n_cal = 0
+    for step_pred, lob, hib in zip(pred_all, lo_raw, hi_raw):
+        if lob is not None and hib is not None:
+            lo_all.append(lob)
+            hi_all.append(hib)
+            n_cal += 1
+        else:
+            band = SPS_DEFAULT_HALF_FRAC * np.abs(step_pred)
+            lo_all.append(step_pred - band)
+            hi_all.append(step_pred + band)
+    return (np.stack(lo_all, axis=0) if lo_all else None,
+            np.stack(hi_all, axis=0) if hi_all else None, n_cal)
+
+
+def sps_component_breakdown(
+    pred_all: np.ndarray,
+    tgt_all: np.ndarray,
+    c: int,
+    lower: np.ndarray | None = None,
+    upper: np.ndarray | None = None,
+) -> dict:
+    """Decompose the official SPS score into loggable components.
+
+    Returns dict with: sps_raw (weighted, from official.aggregate_sps),
+    coverage, mean_nil, mean_exp_neg_nil, sps_dm, sps_tke, sps_mvpe, plus
+    the weights/normalize factor used. ``lower``/``upper`` are resolved
+    (denormalized, full-stack) bounds; when None the scorer default band
+    is used, exactly as official.aggregate_sps does.
+    """
+    official = _official_scoring()
+    sps_raw, coverage = official.aggregate_sps(
+        pred_all, tgt_all, c, lower=lower, upper=upper)
+
+    p = pred_all[..., :c]
+    t = tgt_all[..., :c]
+    if lower is None or upper is None:
+        interval = 0.1 * np.abs(p)
+        lo = p - interval / 2.0
+        hi = p + interval / 2.0
+    else:
+        lo = np.asarray(lower, dtype=np.float32)[..., :c]
+        hi = np.asarray(upper, dtype=np.float32)[..., :c]
+    inside = (t >= lo) & (t <= hi)
+    nil = (hi - lo) / official.SIGMA_GLOBAL
+
+    dm = official.rel_l2_per_sample(pred_all, tgt_all, c)
+    tke = official.tke_rel_l2_per_sample(pred_all, tgt_all, c)
+    mvpe = official.mvpe_rel_l2_per_sample(pred_all, tgt_all)
+    dm_n = dm / (SPS_NORMALIZE_FACTOR + dm)
+    tke_n = tke / (SPS_NORMALIZE_FACTOR + tke)
+    mvpe_n = mvpe / (SPS_NORMALIZE_FACTOR + mvpe)
+
+    def branch(pm: np.ndarray) -> float:
+        shaped = pm.reshape((pm.shape[0],) + (1,) * (p.ndim - 1))
+        elem = (1.0 - shaped) * np.exp(-nil)
+        elem = np.where(inside, elem, 0.0)
+        elem = np.where(np.isfinite(shaped), elem, np.nan)
+        val = float(np.nanmean(elem))
+        return val if np.isfinite(val) else 0.0
+
+    return {
+        "sps_raw": float(sps_raw),
+        "coverage": float(coverage),
+        "mean_nil": float(np.mean(nil)),
+        "mean_exp_neg_nil": float(np.mean(np.exp(-nil))),
+        "sps_dm": branch(dm_n),
+        "sps_tke": branch(tke_n),
+        "sps_mvpe": branch(mvpe_n),
+        "weight_dm": SPS_WEIGHT_DM,
+        "weight_tke": SPS_WEIGHT_TKE,
+        "weight_mvpe": SPS_WEIGHT_MVPE,
+        "normalize_factor": SPS_NORMALIZE_FACTOR,
+        "sigma_global": float(official.SIGMA_GLOBAL),
+    }
+
+
+def evaluate_submission(submission_dir: Path, data_dir: Path, device: str = "cpu") -> dict:
+    """Run the full streaming harness and return every logged metric.
+
+    Importable entry point so notebooks (e.g. sps_bound_kaggle) reuse this
+    instead of copying the loop/SPS logic. Returned dict keys: n_steps,
+    n_traj, channels, mean_t, rel_l2, tke, mvpe, sps_raw, coverage,
+    mean_nil, mean_exp_neg_nil, sps_dm, sps_tke, sps_mvpe, sps_score,
+    subscores{rel_l2_score,tke_score,mvpe_score,time_score,sps_score},
+    final_score, n_cal, mean_adapt_loss.
+    """
     stats_path = data_dir / "mean_std_real.pt"
     if not stats_path.exists():
         raise SystemExit(f"Missing {stats_path}. Run example_data/make_example.py first.")
 
     stream = build_stream(data_dir)
     normalizer = Normalizer(stats_path).to(device)
-    n_traj = len({s["sim_id"] for s in stream})
-    print(f"[local_eval] {len(stream)} steps over {n_traj} trajectories, batch size 1")
 
     module = import_submission(submission_dir)
     model = module.get_ttt_model(str(submission_dir), device)
@@ -179,7 +279,7 @@ def main() -> None:
             raise SystemExit(f"get_ttt_model() returned an object lacking {attr}().")
 
     per_step_times, preds, tgts = [], [], []
-    lo_raw, hi_raw = [], []  # per-step denormalized bounds (None when unreturned)
+    lo_raw, hi_raw, adapt_losses = [], [], []  # per-step denormalized bounds / adapt_loss
     prev_pair = None  # (inp_norm, tgt_norm) of the previous step
     expected_shape = None
 
@@ -209,6 +309,11 @@ def main() -> None:
             )
         if not isinstance(info, dict) or "adapt_loss" not in info:
             raise SystemExit('ttt_step must return (pred, info) with info["adapt_loss"].')
+        if info.get("adapt_loss") is not None:
+            try:
+                adapt_losses.append(float(info["adapt_loss"]))
+            except (TypeError, ValueError):
+                pass
 
         pred_raw = normalizer.postprocess_pred(pred_norm.detach())
         preds.append(pred_raw.squeeze(0).cpu().numpy().astype(np.float32))
@@ -230,54 +335,104 @@ def main() -> None:
     c = measured_channels(tgt_all)
     mean_t = float(np.mean(per_step_times))
 
-    print(f"[local_eval] prediction stack shape {pred_all.shape}")
-    print(f"[local_eval] mean per-step time: {mean_t * 1e3:.2f} ms "
-          f"(total {sum(per_step_times):.3f} s over {len(stream)} steps)")
-
     # Real subscores from the bundled scoring.py (the exact leaderboard formulas).
+    official = _official_scoring()
+    rl = float(np.mean(official.rel_l2_per_sample(pred_all, tgt_all, c)))
+    tk = float(np.mean(official.tke_rel_l2_per_sample(pred_all, tgt_all, c)))
+    mv = official.mvpe_rel_l2(pred_all, tgt_all)
+    lower, upper, n_cal = resolve_sps_bands(pred_all, lo_raw, hi_raw)
+    if n_cal:
+        print(f"[local_eval] scoring SPS with submission intervals "
+              f"({n_cal}/{len(stream)} steps; rest default band)")
+    parts = sps_component_breakdown(pred_all, tgt_all, c, lower=lower, upper=upper)
+    subscores = {
+        "rel_l2_score": official.score_error(rl),
+        "tke_score": official.score_error(tk),
+        "mvpe_score": official.score_error(mv),
+        "time_score": official.score_time(mean_t),
+        "sps_score": official.score_sps(parts["sps_raw"]),
+    }
+    final = float(np.mean(list(subscores.values())))
+
+    return {
+        "n_steps": len(stream),
+        "n_traj": len({s["sim_id"] for s in stream}),
+        "channels": c,
+        "pred_shape": tuple(pred_all.shape),
+        "mean_t": mean_t,
+        "total_t": float(sum(per_step_times)),
+        "rel_l2": rl,
+        "tke": tk,
+        "mvpe": float(mv),
+        "sps_raw": parts["sps_raw"],
+        "coverage": parts["coverage"],
+        "mean_nil": parts["mean_nil"],
+        "mean_exp_neg_nil": parts["mean_exp_neg_nil"],
+        "sps_dm": parts["sps_dm"],
+        "sps_tke": parts["sps_tke"],
+        "sps_mvpe": parts["sps_mvpe"],
+        "sps_score": subscores["sps_score"],
+        "subscores": subscores,
+        "final_score": final,
+        "n_cal": n_cal,
+        "mean_adapt_loss": float(np.mean(adapt_losses)) if adapt_losses else None,
+        "n_adapt_loss": len(adapt_losses),
+    }
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--submission", default=str(HERE),
+                    help="directory containing submission.py (default: this kit)")
+    ap.add_argument("--data", default=str(HERE / "example_data"),
+                    help="example_data directory (default: ./example_data)")
+    ap.add_argument("--device", default="cpu",
+                    help="torch device for the submission model (default: cpu; use cuda on Kaggle GPU)")
+    ap.add_argument("--json-out", default=None,
+                    help="optional path to write the full metrics dict as JSON")
+    args = ap.parse_args()
+
+    submission_dir = Path(args.submission).resolve()
+    data_dir = Path(args.data).resolve()
+
     # On the tiny synthetic example_data these numbers are illustrative, NOT
     # leaderboard-comparable; point --data at real downloaded data for the true
     # metric, and note time_score reflects LOCAL wall time (hardware-dependent).
     try:
-        sys.path.insert(0, str(HERE))
-        import scoring as official
-        rl = float(np.mean(official.rel_l2_per_sample(pred_all, tgt_all, c)))
-        tk = float(np.mean(official.tke_rel_l2_per_sample(pred_all, tgt_all, c)))
-        mv = official.mvpe_rel_l2(pred_all, tgt_all)
-        n_cal = sum(b is not None for b in lo_raw)
-        if n_cal:
-            # Steps without returned bounds get the scorer's default ±5% band,
-            # so partially-calibrated runs still score the returned intervals.
-            lo_all, hi_all = [], []
-            for step_pred, lob, hib in zip(pred_all, lo_raw, hi_raw):
-                if lob is not None and hib is not None:
-                    lo_all.append(lob); hi_all.append(hib)
-                else:
-                    band = 0.05 * np.abs(step_pred)
-                    lo_all.append(step_pred - band); hi_all.append(step_pred + band)
-            print(f"[local_eval] scoring SPS with submission intervals "
-                  f"({n_cal}/{len(stream)} steps; rest default band)")
-            sps, _cov = official.aggregate_sps(
-                pred_all, tgt_all, c,
-                lower=np.stack(lo_all, axis=0), upper=np.stack(hi_all, axis=0))
-        else:
-            sps, _cov = official.aggregate_sps(pred_all, tgt_all, c)
-        subscores = {
-            "rel_l2_score": official.score_error(rl),
-            "tke_score": official.score_error(tk),
-            "mvpe_score": official.score_error(mv),
-            "time_score": official.score_time(mean_t),
-            "sps_score": official.score_sps(sps),
-        }
-        final = float(np.mean(list(subscores.values())))
-        print("[local_eval] real subscores from bundled scoring.py "
-              "(example data, NOT leaderboard):")
-        for name, val in subscores.items():
-            print(f"[local_eval]     {name:12s} {val:7.3f}")
-        print(f"[local_eval]     {'final_score':12s} {final:7.3f}")
+        m = evaluate_submission(submission_dir, data_dir, args.device)
     except Exception as exc:  # noqa: BLE001 - scoring is optional for the smoke test
         print(f"[local_eval] bundled scoring.py not run ({type(exc).__name__}: {exc}); "
               "shape/plumbing check still passed.")
+        print("[local_eval] OK: submission ran end-to-end with correct shapes.")
+        return
+
+    print(f"[local_eval] {m['n_steps']} steps over {m['n_traj']} trajectories, batch size 1")
+    print(f"[local_eval] prediction stack shape {m['pred_shape']}")
+    print(f"[local_eval] mean per-step time: {m['mean_t'] * 1e3:.2f} ms "
+          f"(total {m['total_t']:.3f} s over {m['n_steps']} steps)")
+    print("[local_eval] real subscores from bundled scoring.py "
+          "(example data, NOT leaderboard):")
+    for name, val in m["subscores"].items():
+        print(f"[local_eval]     {name:12s} {val:7.3f}")
+    print(f"[local_eval]     {'final_score':12s} {m['final_score']:7.3f}")
+    print(f"[local_eval] raw errors: rel_l2 {m['rel_l2']:.6f} "
+          f"tke {m['tke']:.6f} mvpe {m['mvpe']:.6f}")
+    print(f"[local_eval] sps components: raw {m['sps_raw']:.6f} "
+          f"coverage {m['coverage']:.4f} mean_nil {m['mean_nil']:.4f} "
+          f"mean_exp_neg_nil {m['mean_exp_neg_nil']:.4f}")
+    print(f"[local_eval] sps branches: dm {m['sps_dm']:.6f} "
+          f"tke {m['sps_tke']:.6f} mvpe {m['sps_mvpe']:.6f} "
+          f"(weights {SPS_WEIGHT_DM:.1f}/{SPS_WEIGHT_TKE:.1f}/{SPS_WEIGHT_MVPE:.1f})")
+    if m["mean_adapt_loss"] is not None:
+        print(f"[local_eval] mean adapt_loss: {m['mean_adapt_loss']:.6f} "
+              f"(over {m['n_adapt_loss']} steps)")
+    if args.json_out:
+        import json
+        out = Path(args.json_out)
+        out.write_text(json.dumps({k: v for k, v in m.items()
+                                   if k != "subscores"} | {"subscores": m["subscores"]},
+                                  indent=2), encoding="utf-8")
+        print(f"[local_eval] metrics written to {out}")
     print("[local_eval] OK: submission ran end-to-end with correct shapes.")
 
 
