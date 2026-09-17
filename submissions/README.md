@@ -23,7 +23,8 @@ its root. `model.pth` is never committed (see `.gitignore`).
 | `submission_v8` | CNO via `load_baseline` | none + speed-conditioned q90 (interp, no EMA) | smoke OK (bounds 4/4) | ~30MB (with ckpt) | real-30: sps 58.72, trails v4 (see Staged) |
 | `submission_v9` | CNO via `load_baseline` | 1-step SGD, no bounds (default band) | smoke OK (default band) | ~30MB (with ckpt) | real-30 full row: final 74.17 (see Staged) |
 | `submission_v10` | CNO via `load_baseline` | 1-step SGD + v4 q90 band every step | smoke OK (bounds 4/4) | ~30MB (with ckpt) | real-30 full row: final 74.71 (see Staged) |
-| `submission_v11` | CNO via `load_baseline` | 1-step SGD on LoRA adapters only (rank 4) | smoke OK (36 Conv3d, 329k LoRA params) | ~30MB (with ckpt) | real-30 run pending (notebook §5f not yet added) |
+| `submission_v11` | CNO via `load_baseline` | 1-step SGD on LoRA adapters only (rank 4) | smoke OK (36 Conv3d, 329k LoRA params) | ~30MB (with ckpt) | pending Kaggle run |
+| `submission_v12` | FNO via `load_baseline` | none + online q90 calibration (v4 band, same knobs) | rel-L2 82.4, sps 51.5 (calibrated 4/4 steps), final 65.0 | ~201MB (fp16 ckpt) | evaluated (smoke) — isolates CNO→FNO backbone effect vs v4 |
 
 ## Changelog
 
@@ -36,6 +37,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 - v7 EMA band (2026-09-18): `submission_v7` = v4's absolute band with infinite memory (`ema = alpha*q + (1-alpha)*ema`, `alpha=1` memoryless). Calibration-only bench (fake tensors, no forward): v7 18.1 vs v4 52.1 ms/step — ~3× cheaper (quantile dominates; v4 sorts 2 windows, v7 one).
 - v8 speed-conditioned band (2026-09-18): `submission_v8` bins residuals by `|prev_pred|` magnitude (quantile edges, `n_bins: 10`), per-channel q90 per bin, linear-interp at each current pixel's speed. No EMA. Direct test of the `C(s)` miscalibration diagnosis.
 - v9/v10 adaptation ladder (2026-09-18): `submission_v9` = reference 1-step SGD on all weights (no bounds); `submission_v10` = same + v4 band. v3 → v9 → v10 isolates adaptation, then calibration.
+- v12 FNO+q90 (2026-09-19): `submission_v12` = v4's band (identical policy knobs) on frozen FNO (`base_model: fno`). fp32 ckpt (~403 MB) exceeds the cap — smoke/pack with `sim_real_fno_fp16.pth`. Run via `notebook/eval_kaggle.ipynb` (`VARIANT='submission_v12'`, `MODEL_HINT='fno'`).
 - v11 test-time LoRA (2026-09-18): `submission_v11` wraps all 36 CNO Conv3ds with rank-4 adapters (`y = conv(x) + (α/r)·B(A(x))`, B zero-init), 329,616 trainable params (~4%), 1-step SGD on adapters only. Pure torch (no `peft`). Local CNO smoke: wraps/loads/adapts end-to-end. Notebook §5f pending.
 
 ## Local runs (`local_eval.py --data ./example_data`, synthetic, NOT leaderboard-comparable)
@@ -102,6 +104,17 @@ Monotone gains with fast decay (+1.35 / +0.82 / +0.22 / +0.09) — default ±5% 
 | hist=1, frames=10 (recency probe) | 59.97 | 0.8102 | 0.404 | 270/270 |
 
 Same 10 frames of residuals either way; recency is slightly sharper (nil 0.404 vs 0.425) at marginally lower coverage. Residuals are fairly stationary — consistent with the v7 alpha-flatness below. Configs otherwise: `sim_real_cno.pth`, `coverage: 0.90`, `fallback_frac: 0.05`. (Supersedes the earlier 59.97/0.7948/0.381 single-row report from the first §5b run.)
+
+### v4 symmetry probe: symmetric q90 vs asymmetric [q05, q95] on real-30 (2026-09-19, Kaggle GPU, `notebook/eval_kaggle.ipynb`)
+
+Same 270-step run, same predictions and table state (`table-mirror err 5.36e-07`); asymmetric band from signed-residual quantiles at the same nominal 90% level:
+
+| band | sps_score | coverage | mean_nil |
+|---|---|---|---|
+| sym `q90(\|resid\|)` | 59.92 | 0.8211 | 0.425 |
+| asym `[q05, q95]` | 59.91 | 0.8196 | 0.424 |
+
+Per-channel tails: u `q95/|q05| = 1.130` (mild right skew), v `= 0.984`. No SPS difference — residuals are effectively symmetric at the 90% level, so keep v4's symmetric band.
 
 ### v5 relative-q90 on real-30 (2026-09-18, Kaggle GPU, notebook §5c — 270 steps)
 
