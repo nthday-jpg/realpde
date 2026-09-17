@@ -141,7 +141,7 @@ class CalibratedTTTModel(TTTModel):
         """
         if self._prev_pred is None:
             return None
-        resid = (prev_target_norm - self._prev_pred).abs()[..., :self.table_frames, :, :, :MEASURED]
+        resid = (prev_target_norm - self._prev_pred).abs()[..., :-self.table_frames, :, :, :MEASURED]
         self._resid.append(resid.detach().reshape(-1, MEASURED).cpu())
         while len(self._resid) > self.history:
             self._resid.popleft()
