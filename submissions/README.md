@@ -25,7 +25,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 | `submission_v10` | CNO via `load_baseline` | 1-step SGD + v4 q90 band every step | smoke OK (bounds 4/4) | ~30MB (with ckpt) | real-30 full row: final 74.71 (see Staged) |
 | `submission_v11` | CNO via `load_baseline` | 1-step SGD on LoRA adapters only (rank 4) | smoke OK (36 Conv3d, 329k LoRA params) | ~30MB (with ckpt) | pending Kaggle run |
 | `submission_v12` | FNO via `load_baseline` | none + online q90 calibration (v4 band, same knobs) | rel-L2 82.4, sps 51.5 (calibrated 4/4 steps), final 65.0 | ~201MB (fp16 ckpt) | evaluated (smoke); real-30 final 82.80, sps 60.53 (see Staged) |
-| `submission_v13` | CNO via `load_baseline` | none + frozen q90 band (v4 warmup, then reuse) | pending | ~30MB (with ckpt) | new — tests amortizing the stationary q90 to ~zero calibration cost |
+| `submission_v13` | FNO via `load_baseline` | none + frozen q90 band (v12 warmup, then reuse) | pending | ~201MB (fp16 ckpt) | new — v12 with amortized band; frozen-vs-online on same backbone |
 
 ## Changelog
 
@@ -38,7 +38,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 - v7 EMA band (2026-09-18): `submission_v7` = v4's absolute band with infinite memory (`ema = alpha*q + (1-alpha)*ema`, `alpha=1` memoryless). Calibration-only bench (fake tensors, no forward): v7 18.1 vs v4 52.1 ms/step — ~3× cheaper (quantile dominates; v4 sorts 2 windows, v7 one).
 - v8 speed-conditioned band (2026-09-18): `submission_v8` bins residuals by `|prev_pred|` magnitude (quantile edges, `n_bins: 10`), per-channel q90 per bin, linear-interp at each current pixel's speed. No EMA. Direct test of the `C(s)` miscalibration diagnosis.
 - v9/v10 adaptation ladder (2026-09-18): `submission_v9` = reference 1-step SGD on all weights (no bounds); `submission_v10` = same + v4 band. v3 → v9 → v10 isolates adaptation, then calibration.
-- v13 frozen-q90 band (2026-09-19): `submission_v13` = v4's table for the first `warmup_windows: 5` revealed pairs, then the q90 freezes run-wide (survives trajectory resets) — no further table/quantile work. Warmup steps are v4-quality, so any SPS delta vs v4 is the pure price of freezing. If SPS holds with v3-like time, final jumps (motivation: v7 staged 207.8ms/step vs v3's 11ms band-free). Run via `notebook/eval_kaggle.ipynb` (`VARIANT='submission_v13'`).
+- v13 frozen-q90 band (2026-09-19): `submission_v13` = v12's FNO + v4-style table for the first `warmup_windows: 5` revealed pairs, then the q90 freezes run-wide (survives trajectory resets) — no further table/quantile work. Warmup steps are v12-quality, so any SPS delta vs v12 is the pure price of freezing. Run via `notebook/eval_kaggle.ipynb` (`VARIANT='submission_v13'`, `MODEL_HINT='fno'`); pack with fp16.
 - v12 FNO+q90 (2026-09-19): `submission_v12` = v4's band (identical policy knobs) on frozen FNO (`base_model: fno`). fp32 ckpt (~403 MB) exceeds the cap — smoke/pack with `sim_real_fno_fp16.pth`. Run via `notebook/eval_kaggle.ipynb` (`VARIANT='submission_v12'`, `MODEL_HINT='fno'`).
 - v11 test-time LoRA (2026-09-18): `submission_v11` wraps all 36 CNO Conv3ds with rank-4 adapters (`y = conv(x) + (α/r)·B(A(x))`, B zero-init), 329,616 trainable params (~4%), 1-step SGD on adapters only. Pure torch (no `peft`). Local CNO smoke: wraps/loads/adapts end-to-end. Notebook §5f pending.
 

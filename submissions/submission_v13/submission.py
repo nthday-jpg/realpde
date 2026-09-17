@@ -1,4 +1,4 @@
-"""submission_v13 — CNO + frozen q90 band (compute once, reuse everywhere).
+"""submission_v13 — FNO + frozen q90 band (compute once, reuse everywhere).
 
 v4's band with the per-step quantile deleted: the first ``warmup_windows``
 revealed pairs fill the residual table exactly like v4 (same slicing, same
@@ -8,8 +8,9 @@ quantiles after warmup: per-step cost drops to the bare forward pass.
 
 Rationale: the residual q90 is stationary (v7 EMA alpha-flat 59.96–59.98;
 v4 history/frames ablation flat), so re-estimating it every step buys nothing
-and the quantile dominates step time (v7 staged 207.8ms/step vs v3's 11ms
-band-free). If SPS holds at v4's level with v3-like time, final jumps.
+and the quantile dominates step time (v12 staged 30.6ms/step with the
+per-step quantile; freezing should approach the bare FNO forward). If SPS
+holds at v12's level with near-zero calibration cost, final jumps.
 
 Only genuinely revealed data is used (previous pairs); the current target is
 never touched. Weights stay frozen — no gradient steps. Bounds ride in
@@ -63,7 +64,7 @@ class TinyForecaster(nn.Module):
 def _read_policy(submission_dir: str) -> Dict[str, Any]:
     """Flat policy reader: base_model (str), coverage (float), history (int)."""
     policy: Dict[str, Any] = {
-        "base_model": "cno", "coverage": 0.90, "history": 5,
+        "base_model": "fno", "coverage": 0.90, "history": 5,
         "table_frames": 5, "fallback_frac": 0.05, "warmup_windows": 5,
     }
     path = os.path.join(submission_dir, "policy.yaml")
