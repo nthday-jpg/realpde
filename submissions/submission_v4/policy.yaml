@@ -6,4 +6,9 @@ base_model: cno
 # Residual quantile level: nominal per-step coverage of the interval table.
 coverage: 0.90
 # Previous (pred, target) windows kept in the residual table.
-history: 5
+history: 2
+# First T time-frames of each window kept in the table (T=20, default 5).
+table_frames: 5
+# Relative half-width used when the residual table is empty (trajectory start)
+# so bounds are returned on every step. 0.05 mirrors the scorer's default band.
+fallback_frac: 0.05

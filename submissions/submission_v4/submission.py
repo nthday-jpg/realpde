@@ -10,12 +10,20 @@ subscore. Each step (after the first) does a table lookup:
 Only genuinely revealed data is used (previous pair); the current target is
 never touched. Weights stay frozen — no gradient steps, so the Time cost over
 v3 is one small quantile per step. Bounds ride in ``info["lower"/"upper"]``
-(normalized space, model device); when the table is empty (first step) the
-keys are omitted and the scorer falls back to its default ±5% band.
+(normalized space, model device).
+
+Fix: bounds are returned on EVERY step. The ingestion program enforces that a
+submission supplies intervals on every step or on none (whole run). On the
+first step of a trajectory the residual table is empty, so we fall back to a
+relative band ``pred ± fallback_frac*|pred|`` (default 0.05, same width as
+the scorer's default) until the table fills; after that the quantile band is
+used.
 
 Knobs in ``policy.yaml``: ``base_model`` (ckpt hint, default ``cno``),
 ``coverage`` (quantile level, default 0.90), ``history`` (residual windows
-kept, default 5).
+kept, default 5), ``table_frames`` (first T time-frames of each window kept
+in the table; T=20, default 5), ``fallback_frac`` (relative half-width when
+the table is empty, default 0.05).
 """
 
 from __future__ import annotations
@@ -55,7 +63,10 @@ class TinyForecaster(nn.Module):
 
 def _read_policy(submission_dir: str) -> Dict[str, Any]:
     """Flat policy reader: base_model (str), coverage (float), history (int)."""
-    policy: Dict[str, Any] = {"base_model": "cno", "coverage": 0.90, "history": 5}
+    policy: Dict[str, Any] = {
+        "base_model": "cno", "coverage": 0.90, "history": 5,
+        "table_frames": 5, "fallback_frac": 0.05,
+    }
     path = os.path.join(submission_dir, "policy.yaml")
     if not os.path.exists(path):
         return policy
@@ -71,6 +82,10 @@ def _read_policy(submission_dir: str) -> Dict[str, Any]:
                 policy[k] = float(v)
             elif k == "history":
                 policy[k] = max(int(v), 1)
+            elif k == "table_frames":
+                policy[k] = max(int(v), 1)
+            elif k == "fallback_frac":
+                policy[k] = float(v)
     if not (0.0 < policy["coverage"] < 1.0):
         raise ValueError(f"coverage must be in (0, 1), got {policy['coverage']}")
     return policy
@@ -80,15 +95,39 @@ class CalibratedTTTModel(TTTModel):
     """Frozen forecaster with an online residual-quantile interval table."""
 
     def __init__(self, base: nn.Module, device: str, coverage: float = 0.90,
-                 history: int = 5):
+                 history: int = 5, table_frames: int = 5,
+                 fallback_frac: float = 0.05):
         super().__init__()
         self.base = base.to(device)
         self.device = device
         self.coverage = coverage
         self.history = history
+        self.table_frames = table_frames
+        self.fallback_frac = fallback_frac
         self._init_state = copy.deepcopy(self.base.state_dict())
         self._resid: deque[torch.Tensor] = deque()
         self._prev_pred: Optional[torch.Tensor] = None
+
+    def _make_bounds(self, pred_norm: torch.Tensor,
+                     half_width: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Build a (lower, upper) pair in pred_norm's shape on every step.
+
+        Uses the calibrated half-width when the table is ready; otherwise falls
+        back to a relative band ``pred ± fallback_frac*|pred|`` so bounds are
+        never omitted (enforcement: all steps or none).
+        """
+        f = self.fallback_frac
+        if half_width is not None:
+            w_uv = half_width.to(self.device).view(1, 1, 1, 1, MEASURED)
+        else:
+            w_uv = f * pred_norm[..., :MEASURED].abs()
+        # Unmeasured p channel gets a nominal width (scorer grades u, v only).
+        w_p = f * pred_norm[..., MEASURED:].abs()
+        lo = torch.cat([pred_norm[..., :MEASURED] - w_uv,
+                        pred_norm[..., MEASURED:] - w_p], dim=-1)
+        hi = torch.cat([pred_norm[..., :MEASURED] + w_uv,
+                        pred_norm[..., MEASURED:] + w_p], dim=-1)
+        return lo, hi
 
     def reset_ttt_state(self) -> None:
         self.base.load_state_dict(copy.deepcopy(self._init_state))
@@ -102,7 +141,7 @@ class CalibratedTTTModel(TTTModel):
         """
         if self._prev_pred is None:
             return None
-        resid = (prev_target_norm - self._prev_pred).abs()[..., :MEASURED]
+        resid = (prev_target_norm - self._prev_pred).abs()[..., :self.table_frames, :, :, :MEASURED]
         self._resid.append(resid.detach().reshape(-1, MEASURED).cpu())
         while len(self._resid) > self.history:
             self._resid.popleft()
@@ -127,15 +166,11 @@ class CalibratedTTTModel(TTTModel):
         with torch.no_grad():
             pred_norm = self.base(input_norm)
 
-        # (3) Table lookup: band around the current prediction.
+        # (3) Build a band around the current prediction on EVERY step.
         info: Dict[str, Any] = {"adapt_loss": None}
-        if half_width is not None:
-            hw = half_width.to(self.device).view(1, 1, 1, 1, MEASURED)
-            lo_uv = pred_norm[..., :MEASURED] - hw
-            hi_uv = pred_norm[..., :MEASURED] + hw
-            lo_p = hi_p = pred_norm[..., MEASURED:]
-            info["lower"] = torch.cat([lo_uv, lo_p], dim=-1)
-            info["upper"] = torch.cat([hi_uv, hi_p], dim=-1)
+        lo, hi = self._make_bounds(pred_norm, half_width)
+        info["lower"] = lo
+        info["upper"] = hi
 
         self._prev_pred = pred_norm.detach()
 
@@ -160,4 +195,5 @@ def get_ttt_model(submission_dir: str, device: str):
     """Entry point called once by the evaluator (construction is not timed)."""
     policy = _read_policy(submission_dir)
     base = _build_base(submission_dir, device, policy)
-    return CalibratedTTTModel(base, device, policy["coverage"], policy["history"])
+    return CalibratedTTTModel(base, device, policy["coverage"], policy["history"],
+                              policy["table_frames"], policy["fallback_frac"])

@@ -8,12 +8,16 @@ width near stagnation. v5 scales the band by local magnitude, per channel:
     width = q90 * |pred|;  lower, upper = pred - width, pred + width
 
 All in normalized units. Weights stay frozen (``adapt_loss: None``); bounds
-ride in ``info["lower"/"upper"]``; first step of each trajectory omits them
-(scorer default applies).
+ride in ``info["lower"/"upper"]`` and are returned on EVERY step (ingestion
+enforces all-or-none). When the relative table is empty (trajectory start) it
+falls back to ``pred ± fallback_frac*|pred|`` (default 0.05, same width as the
+scorer's default band).
 
 Knobs in ``policy.yaml``: ``base_model`` (ckpt hint, default ``cno``),
 ``coverage`` (quantile level, default 0.90), ``history`` (residual windows
-kept, default 5). ``eps = 1e-6`` guards the division.
+kept, default 5), ``table_frames`` (first T time-frames of each window kept
+in the table; T=20, default 5), ``fallback_frac`` (relative half-width when
+the table is empty, default 0.05). ``eps = 1e-6`` guards the division.
 """
 
 from __future__ import annotations
@@ -54,7 +58,10 @@ class TinyForecaster(nn.Module):
 
 def _read_policy(submission_dir: str) -> Dict[str, Any]:
     """Flat policy reader: base_model (str), coverage (float), history (int)."""
-    policy: Dict[str, Any] = {"base_model": "cno", "coverage": 0.90, "history": 5}
+    policy: Dict[str, Any] = {
+        "base_model": "cno", "coverage": 0.90, "history": 5,
+        "table_frames": 5, "fallback_frac": 0.05,
+    }
     path = os.path.join(submission_dir, "policy.yaml")
     if not os.path.exists(path):
         return policy
@@ -70,6 +77,10 @@ def _read_policy(submission_dir: str) -> Dict[str, Any]:
                 policy[k] = float(v)
             elif k == "history":
                 policy[k] = max(int(v), 1)
+            elif k == "table_frames":
+                policy[k] = max(int(v), 1)
+            elif k == "fallback_frac":
+                policy[k] = float(v)
     if not (0.0 < policy["coverage"] < 1.0):
         raise ValueError(f"coverage must be in (0, 1), got {policy['coverage']}")
     return policy
@@ -79,15 +90,40 @@ class RelativeCalibratedTTTModel(TTTModel):
     """Frozen forecaster with an online relative-residual quantile table."""
 
     def __init__(self, base: nn.Module, device: str, coverage: float = 0.90,
-                 history: int = 5):
+                 history: int = 5, table_frames: int = 5,
+                 fallback_frac: float = 0.05):
         super().__init__()
         self.base = base.to(device)
         self.device = device
         self.coverage = coverage
         self.history = history
+        self.table_frames = table_frames
+        self.fallback_frac = fallback_frac
         self._init_state = copy.deepcopy(self.base.state_dict())
         self._resid: deque[torch.Tensor] = deque()
         self._prev_pred: Optional[torch.Tensor] = None
+
+    def _make_bounds(self, pred_norm: torch.Tensor,
+                     qrel: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Build a (lower, upper) pair in pred_norm's shape on every step.
+
+        Uses the calibrated relative factor when the table is ready; otherwise
+        falls back to ``pred ± fallback_frac*|pred|`` so bounds are never
+        omitted (enforcement: all steps or none).
+        """
+        f = self.fallback_frac
+        if qrel is not None:
+            factor = qrel.to(self.device).view(1, 1, 1, 1, MEASURED)
+            w_uv = factor * pred_norm[..., :MEASURED].abs()
+        else:
+            w_uv = f * pred_norm[..., :MEASURED].abs()
+        # Unmeasured p channel gets a nominal width (scorer grades u, v only).
+        w_p = f * pred_norm[..., MEASURED:].abs()
+        lo = torch.cat([pred_norm[..., :MEASURED] - w_uv,
+                        pred_norm[..., MEASURED:] - w_p], dim=-1)
+        hi = torch.cat([pred_norm[..., :MEASURED] + w_uv,
+                        pred_norm[..., MEASURED:] + w_p], dim=-1)
+        return lo, hi
 
     def reset_ttt_state(self) -> None:
         self.base.load_state_dict(copy.deepcopy(self._init_state))
@@ -104,6 +140,9 @@ class RelativeCalibratedTTTModel(TTTModel):
         prev_pred = self._prev_pred[..., :MEASURED]
         prev_tgt = prev_target_norm[..., :MEASURED]
         rel = (prev_tgt - prev_pred).abs() / (prev_pred.abs() + EPS)
+        # Keep only the first `table_frames` time-frames of the window (T=20)
+        # so the quantile table draws on the leading portion of each window.
+        rel = rel[..., :self.table_frames, :, :, :MEASURED]
         self._resid.append(rel.detach().reshape(-1, MEASURED).cpu())
         while len(self._resid) > self.history:
             self._resid.popleft()
@@ -128,16 +167,11 @@ class RelativeCalibratedTTTModel(TTTModel):
         with torch.no_grad():
             pred_norm = self.base(input_norm)
 
-        # (3) Table lookup: magnitude-scaled band around the current prediction.
+        # (3) Build a band around the current prediction on EVERY step.
         info: Dict[str, Any] = {"adapt_loss": None}
-        if qrel is not None:
-            factor = qrel.to(self.device).view(1, 1, 1, 1, MEASURED)
-            width_uv = factor * pred_norm[..., :MEASURED].abs()
-            lo_uv = pred_norm[..., :MEASURED] - width_uv
-            hi_uv = pred_norm[..., :MEASURED] + width_uv
-            lo_p = hi_p = pred_norm[..., MEASURED:]
-            info["lower"] = torch.cat([lo_uv, lo_p], dim=-1)
-            info["upper"] = torch.cat([hi_uv, hi_p], dim=-1)
+        lo, hi = self._make_bounds(pred_norm, qrel)
+        info["lower"] = lo
+        info["upper"] = hi
 
         self._prev_pred = pred_norm.detach()
 
@@ -162,4 +196,5 @@ def get_ttt_model(submission_dir: str, device: str):
     """Entry point called once by the evaluator (construction is not timed)."""
     policy = _read_policy(submission_dir)
     base = _build_base(submission_dir, device, policy)
-    return RelativeCalibratedTTTModel(base, device, policy["coverage"], policy["history"])
+    return RelativeCalibratedTTTModel(base, device, policy["coverage"], policy["history"],
+                                      policy["table_frames"], policy["fallback_frac"])
