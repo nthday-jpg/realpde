@@ -1,0 +1,16 @@
+# v8 knobs: base-model hint + speed-conditioned calibration settings.
+# Resolution for base_model: this file > BASE_MODEL env > default "cno".
+# Needed because the staged checkpoint is renamed to model.pth,
+# which carries no architecture hint for load_baseline.
+base_model: cno
+# Residual quantile level per speed bin: nominal conditional coverage.
+coverage: 0.90
+# Previous (pred, target) windows kept in the table (same as v4 default).
+history: 2
+# First T time-frames of each window entering the table (T=20, default 5).
+table_frames: 5
+# Relative half-width before the first table update (trajectory start)
+# so bounds are returned on every step. 0.05 mirrors the scorer's default band.
+fallback_frac: 0.05
+# Predicted-speed bins for the conditional q90 (quantile edges of pooled speed).
+n_bins: 10

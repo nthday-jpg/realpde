@@ -20,6 +20,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 | `submission_v5` | CNO via `load_baseline` | none + online relative-q90 | rel-L2 82.6, sps 50.9 (calibrated 2/4 steps), final 63.3 | ~30MB (with ckpt) | evaluated (smoke, see Local runs) |
 | `submission_v6` | CNO via `load_baseline` | none + fixed `pred ± bound_frac*|pred|` every step | rel-L2 77.6, sps 50.4 (4/4 steps, default w), final 72.0 | ~30MB (with ckpt) | smoke OK, see Local runs |
 | `submission_v7` | CNO via `load_baseline` | none + EMA quantile band (`ema_alpha` sweep) | rel-L2 78.7, sps 51.6 (4/4 steps, default a), final 71.3 | ~30MB (with ckpt) | smoke OK, Kaggle sweep pending |
+| `submission_v8` | CNO via `load_baseline` | none + speed-conditioned q90 (interp, no EMA) | rel-L2 77.6, sps 51.5 (4/4 steps), final 70.4 | ~30MB (with ckpt) | smoke OK, Kaggle run pending (§5d) |
 
 ## Changelog
 
@@ -87,6 +88,14 @@ Bounds on 4/4 steps (all-or-none satisfied, `bound_frac: 0.05` = scorer default 
 | 78.708 | 79.322 | 87.858 | 58.766 | 51.608 | 71.252 | 359ms |
 
 Bounds on 4/4 steps (`ema_alpha: 0.30` default). Kaggle sweep over `ALPHAS = [0.10, 0.30, 0.50, 0.70, 1.00]` + v5 one-row comparison in notebook §5c; §6 packs one zip per alpha.
+
+### v8, TinyForecaster fallback (no `model.pth`, CPU)
+
+| rel_l2 | tke | mvpe | time | sps | final | per-step |
+|---|---|---|---|---|---|---|
+| 77.558 | 78.652 | 86.245 | 58.065 | 51.475 | 70.399 | 380ms |
+
+Bounds on 4/4 steps (speed-binned q90, `history: 2`, `table_frames: 5`, `n_bins: 10`). Kaggle run in notebook §5d on the same real-30 split; §6 packs `dist/submission_v8_cno.zip`.
 
 ## Staged real-data runs (Kaggle GPU, `scripts/stage_real30.py` 30 traj / seed 42 — diagnostic, NOT leaderboard)
 
