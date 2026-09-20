@@ -1,15 +1,18 @@
-# submission_v12 — FNO + online q90 calibration (frozen weights + intervals)
+# submission_v12 — FNO + frozen q90 band (compute once, reuse everywhere)
 
-Same band as `submission_v4`, different backbone: frozen FNO point predictions
-plus the per-step `q90(|resid|)` interval table over the revealed previous
-pair (`history: 2`, `table_frames: 5`, `coverage: 0.90`, `fallback_frac: 0.05` —
-identical knobs, so v4-vs-v12 isolates the CNO→FNO backbone effect on both
-point accuracy and SPS).
+Frozen FNO point predictions plus a q90 band computed once and reused: the
+first `warmup_windows` revealed pairs fill the table like v4 (warmup steps are
+online-quality), then the per-channel q90 freezes run-wide — no further
+table/quantile work. Promoted from `submission_v13` (removed) after the frozen
+band beat the online band on real-30 (sps 61.05 vs 60.53, final 83.16 vs
+82.80): sharpness won over coverage.
 
 - **Adaptation:** none on weights (frozen FNO, `adapt_loss: None` always).
-- **Calibration:** v4's table, unchanged (`submission.py` is v4's logic retagged).
+- **Calibration:** v4 table during warmup, frozen `pred ± q90` after
+  (`warmup_windows: 5`, `coverage: 0.90`, `history: 2`, `table_frames: 5`);
+  `TinyForecaster` fallback, bounds every step.
 - **Base model:** `sim_real_fno` checkpoint via `load_baseline`
-  (`policy.yaml: base_model: fno`); `TinyForecaster` fallback.
+  (`policy.yaml: base_model: fno`).
 - **Size:** the fp32 FNO checkpoint (~403 MB) exceeds the 256 MB cap — pack
   with the fp16 checkpoint (`sim_real_fno_fp16.pth`, ~201 MB), which
   `load_baseline` unpacks transparently.

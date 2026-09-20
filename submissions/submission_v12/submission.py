@@ -1,29 +1,29 @@
-"""submission_v12 — FNO + online quantile calibration (frozen weights + intervals).
+"""submission_v12 — FNO + frozen q90 band (compute once, reuse everywhere).
 
-Same band as submission_v4, FNO backbone. Each step (after the first) does a
-table lookup:
+v4's band with the per-step quantile deleted: the first ``warmup_windows``
+revealed pairs fill the residual table exactly like v4 (same slicing, same
+quantile — warmup steps are v4-quality), then the per-channel q90 is frozen
+and reused for every later step of every trajectory. No table updates, no
+quantiles after warmup: per-step cost drops to the bare forward pass.
 
-    residual = |prev_target - prev_pred|      # revealed previous pair, normalized units
-    q90[channel] = quantile(residual, 0.90)   # per-channel table over recent history
-    lower, upper = pred - q90, pred + q90      # band for the CURRENT prediction
+Rationale: the residual q90 is stationary (v7 EMA alpha-flat 59.96–59.98;
+v4 history/frames ablation flat), so re-estimating it every step buys nothing
+and the quantile dominates step time (v12 staged 30.6ms/step with the
+per-step quantile; freezing should approach the bare FNO forward). If SPS
+holds at v12's level with near-zero calibration cost, final jumps.
 
-Only genuinely revealed data is used (previous pair); the current target is
-never touched. Weights stay frozen — no gradient steps, so the Time cost over
-v3 is one small quantile per step. Bounds ride in ``info["lower"/"upper"]``
-(normalized space, model device).
-
-Fix: bounds are returned on EVERY step. The ingestion program enforces that a
-submission supplies intervals on every step or on none (whole run). On the
-first step of a trajectory the residual table is empty, so we fall back to a
-relative band ``pred ± fallback_frac*|pred|`` (default 0.05, same width as
-the scorer's default) until the table fills; after that the quantile band is
-used.
+Only genuinely revealed data is used (previous pairs); the current target is
+never touched. Weights stay frozen — no gradient steps. Bounds ride in
+``info["lower"/"upper"]`` (normalized space, model device) on EVERY step:
+fallback ``pred ± fallback_frac*|pred|`` before the first table entry,
+v4-live quantiles during warmup, frozen band after.
 
 Knobs in ``policy.yaml``: ``base_model`` (ckpt hint, default ``cno``),
 ``coverage`` (quantile level, default 0.90), ``history`` (residual windows
-kept, default 5), ``table_frames`` (first T time-frames of each window kept
-in the table; T=20, default 5), ``fallback_frac`` (relative half-width when
-the table is empty, default 0.05).
+kept during warmup, default 2), ``table_frames`` (first T time-frames of each
+window kept in the table; T=20, default 5), ``warmup_windows`` (revealed pairs
+before freezing, default 5), ``fallback_frac`` (relative half-width when the
+table is empty, default 0.05).
 """
 
 from __future__ import annotations
@@ -64,8 +64,8 @@ class TinyForecaster(nn.Module):
 def _read_policy(submission_dir: str) -> Dict[str, Any]:
     """Flat policy reader: base_model (str), coverage (float), history (int)."""
     policy: Dict[str, Any] = {
-        "base_model": "cno", "coverage": 0.90, "history": 5,
-        "table_frames": 5, "fallback_frac": 0.05,
+        "base_model": "fno", "coverage": 0.90, "history": 5,
+        "table_frames": 5, "fallback_frac": 0.05, "warmup_windows": 5,
     }
     path = os.path.join(submission_dir, "policy.yaml")
     if not os.path.exists(path):
@@ -86,17 +86,19 @@ def _read_policy(submission_dir: str) -> Dict[str, Any]:
                 policy[k] = max(int(v), 1)
             elif k == "fallback_frac":
                 policy[k] = float(v)
+            elif k == "warmup_windows":
+                policy[k] = max(int(v), 1)
     if not (0.0 < policy["coverage"] < 1.0):
         raise ValueError(f"coverage must be in (0, 1), got {policy['coverage']}")
     return policy
 
 
 class CalibratedTTTModel(TTTModel):
-    """Frozen forecaster with an online residual-quantile interval table."""
+    """Frozen forecaster with a frozen residual-quantile band (compute once)."""
 
     def __init__(self, base: nn.Module, device: str, coverage: float = 0.90,
                  history: int = 5, table_frames: int = 5,
-                 fallback_frac: float = 0.05):
+                 fallback_frac: float = 0.05, warmup_windows: int = 5):
         super().__init__()
         self.base = base.to(device)
         self.device = device
@@ -104,9 +106,12 @@ class CalibratedTTTModel(TTTModel):
         self.history = history
         self.table_frames = table_frames
         self.fallback_frac = fallback_frac
+        self.warmup_windows = warmup_windows
         self._init_state = copy.deepcopy(self.base.state_dict())
         self._resid: deque[torch.Tensor] = deque()
         self._prev_pred: Optional[torch.Tensor] = None
+        self._frozen: Optional[torch.Tensor] = None
+        self._n_seen = 0
 
     def _make_bounds(self, pred_norm: torch.Tensor,
                      half_width: Optional[torch.Tensor]) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -133,20 +138,30 @@ class CalibratedTTTModel(TTTModel):
         self.base.load_state_dict(copy.deepcopy(self._init_state))
         self._resid.clear()
         self._prev_pred = None
+        # NOTE: _frozen and _n_seen survive resets — the band is computed once
+        # per run, then reused for every later step of every trajectory.
 
     def _update_table(self, prev_target_norm: torch.Tensor) -> Optional[torch.Tensor]:
         """Fold the revealed previous pair into the residual table.
 
-        Returns per-channel quantile half-widths, or None when no table yet.
+        After ``warmup_windows`` pairs have been seen (run-level count), the
+        band freezes: returns the frozen half-widths with no table or quantile
+        work. Warmup steps behave exactly like v4.
         """
+        if self._frozen is not None:
+            return self._frozen
         if self._prev_pred is None:
             return None
         resid = (prev_target_norm - self._prev_pred).abs()[..., :-self.table_frames, :, :, :MEASURED]
         self._resid.append(resid.detach().reshape(-1, MEASURED).cpu())
         while len(self._resid) > self.history:
             self._resid.popleft()
+        self._n_seen += 1
         pooled = torch.cat(list(self._resid), dim=0)
-        return torch.quantile(pooled, self.coverage, dim=0)
+        q = torch.quantile(pooled, self.coverage, dim=0)
+        if self._n_seen >= self.warmup_windows:
+            self._frozen = q
+        return q
 
     def ttt_step(
         self,
@@ -156,10 +171,15 @@ class CalibratedTTTModel(TTTModel):
         input_norm = torch.as_tensor(input_norm).to(self.device)
 
         # (1) Calibrate on the PREVIOUS (pred, target) pair, both revealed.
+        # The frozen band (post-warmup) also covers trajectory starts, where
+        # there is no previous pair yet — it is run-level knowledge and does
+        # not depend on the current target.
         half_width: Optional[torch.Tensor] = None
         if prev_target_norm is not None:
             prev_target_norm = torch.as_tensor(prev_target_norm).to(self.device)
             half_width = self._update_table(prev_target_norm)
+        elif self._frozen is not None:
+            half_width = self._frozen
 
         # (2) Predict the current window -- no gradients, no current target.
         self.base.eval()
@@ -196,4 +216,5 @@ def get_ttt_model(submission_dir: str, device: str):
     policy = _read_policy(submission_dir)
     base = _build_base(submission_dir, device, policy)
     return CalibratedTTTModel(base, device, policy["coverage"], policy["history"],
-                              policy["table_frames"], policy["fallback_frac"])
+                              policy["table_frames"], policy["fallback_frac"],
+                              policy["warmup_windows"])

@@ -24,8 +24,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 | `submission_v9` | CNO via `load_baseline` | 1-step SGD, no bounds (default band) | smoke OK (default band) | ~30MB (with ckpt) | real-30 full row: final 74.17 (see Staged) |
 | `submission_v10` | CNO via `load_baseline` | 1-step SGD + v4 q90 band every step | smoke OK (bounds 4/4) | ~30MB (with ckpt) | real-30 full row: final 74.71 (see Staged) |
 | `submission_v11` | CNO via `load_baseline` | 1-step SGD on LoRA adapters only (rank 4) | smoke OK (36 Conv3d, 329k LoRA params) | ~30MB (with ckpt) | pending Kaggle run |
-| `submission_v12` | FNO via `load_baseline` | none + online q90 calibration (v4 band, same knobs) | rel-L2 82.4, sps 51.5 (calibrated 4/4 steps), final 65.0 | ~201MB (fp16 ckpt) | evaluated (smoke); real-30 final 82.80, sps 60.53 (see Staged) |
-| `submission_v13` | FNO via `load_baseline` | none + frozen q90 band (v12 warmup, then reuse) | pending | ~201MB (fp16 ckpt) | new — v12 with amortized band; frozen-vs-online on same backbone |
+| `submission_v12` | FNO via `load_baseline` | none + frozen q90 band (online warmup, then reuse) | rel-L2 82.4, sps 51.5 (warmup path, 4/4 steps), final 61.8 | ~201MB (fp16 ckpt) | evaluated (smoke); real-30 final 83.16, sps 61.05 (see Staged) |
 
 ## Changelog
 
@@ -38,8 +37,8 @@ its root. `model.pth` is never committed (see `.gitignore`).
 - v7 EMA band (2026-09-18): `submission_v7` = v4's absolute band with infinite memory (`ema = alpha*q + (1-alpha)*ema`, `alpha=1` memoryless). Calibration-only bench (fake tensors, no forward): v7 18.1 vs v4 52.1 ms/step — ~3× cheaper (quantile dominates; v4 sorts 2 windows, v7 one).
 - v8 speed-conditioned band (2026-09-18): `submission_v8` bins residuals by `|prev_pred|` magnitude (quantile edges, `n_bins: 10`), per-channel q90 per bin, linear-interp at each current pixel's speed. No EMA. Direct test of the `C(s)` miscalibration diagnosis.
 - v9/v10 adaptation ladder (2026-09-18): `submission_v9` = reference 1-step SGD on all weights (no bounds); `submission_v10` = same + v4 band. v3 → v9 → v10 isolates adaptation, then calibration.
-- v13 frozen-q90 band (2026-09-19): `submission_v13` = v12's FNO + v4-style table for the first `warmup_windows: 5` revealed pairs, then the q90 freezes run-wide (survives trajectory resets) — no further table/quantile work. Warmup steps are v12-quality, so any SPS delta vs v12 is the pure price of freezing. Run via `notebook/eval_kaggle.ipynb` (`VARIANT='submission_v13'`, `MODEL_HINT='fno'`); pack with fp16.
-- v12 FNO+q90 (2026-09-19): `submission_v12` = v4's band (identical policy knobs) on frozen FNO (`base_model: fno`). fp32 ckpt (~403 MB) exceeds the cap — smoke/pack with `sim_real_fno_fp16.pth`. Run via `notebook/eval_kaggle.ipynb` (`VARIANT='submission_v12'`, `MODEL_HINT='fno'`).
+- v13 frozen-q90 band (2026-09-19, merged into v12 same day): `submission_v13` was v12's FNO + v4-style table for the first `warmup_windows: 5` pairs, then run-wide freeze. Real-30: sps 61.05 vs online 60.53 — frozen won, so v12 now runs the frozen implementation and `submission_v13/` was removed (history kept here).
+- v12 FNO+q90 (2026-09-19): `submission_v12` = frozen FNO band (`base_model: fno`, online warmup then run-wide freeze; previously v4's per-step band, superseded). fp32 ckpt (~403 MB) exceeds the cap — smoke/pack with `sim_real_fno_fp16.pth`. Run via `notebook/eval_kaggle.ipynb` (`VARIANT='submission_v12'`, `MODEL_HINT='fno'`).
 - v11 test-time LoRA (2026-09-18): `submission_v11` wraps all 36 CNO Conv3ds with rank-4 adapters (`y = conv(x) + (α/r)·B(A(x))`, B zero-init), 329,616 trainable params (~4%), 1-step SGD on adapters only. Pure torch (no `peft`). Local CNO smoke: wraps/loads/adapts end-to-end. Notebook §5f pending.
 
 ## Local runs (`local_eval.py --data ./example_data`, synthetic, NOT leaderboard-comparable)
@@ -118,15 +117,15 @@ Same 270-step run, same predictions and table state (`table-mirror err 5.36e-07`
 
 Per-channel tails: u `q95/|q05| = 1.130` (mild right skew), v `= 0.984`. No SPS difference — residuals are effectively symmetric at the 90% level, so keep v4's symmetric band.
 
-### v12 FNO + v4 q90 band on real-30 (2026-09-19, Kaggle GPU, `notebook/eval_kaggle.ipynb` — 270 steps)
+### v12 FNO + frozen q90 band on real-30 (2026-09-19, Kaggle GPU, `notebook/eval_kaggle.ipynb` — 270 steps)
 
 | rel_l2 | tke | mvpe | time | sps | final | per-step |
 |---|---|---|---|---|---|---|
-| 96.240 | 77.909 | 96.334 | 82.992 | 60.532 | 82.801 | 30.6ms |
+| 96.240 | 77.909 | 96.334 | 84.273 | 61.048 | 83.161 | 25.4ms |
 
-SPS components (270/270 steps with bounds): coverage 0.8180, mean_nil 0.3735 (raw 0.427681; branches dm 0.494 / tke 0.272 / mvpe 0.496).
+SPS components (270/270 steps with bounds): raw 0.449313, coverage 0.7473, mean_nil 0.2347 (exp(-nil) 0.7969; branches dm 0.519 / tke 0.285 / mvpe 0.521).
 
-FNO beats CNO on every point score (rel-L2 96.24 vs v3's 95.86, TKE 77.91 vs 75.45, MVPE 96.33 vs 96.12) AND calibrates sharper: same coverage as v4 (~0.82) at lower nil (0.374 vs 0.425), sps 60.53 vs 59.92. Tighter FNO residuals buy both accuracy and sharpness — best staged final so far (82.80). Costs speed: 30.6ms/step vs CNO's 11ms (time 83.0 vs 89.1; same-GPU caveat as always). Staged with fp32 `sim_real_fno.pth` as `model.pth`; pack with the fp16 checkpoint to stay under the cap.
+Frozen beats online: the same FNO with v4's per-step band scored sps 60.53 at coverage 0.8180 / nil 0.374; freezing after 5 warmup windows drops coverage 7pts (0.747) but cuts width 37% (nil 0.235) — sharpness wins over coverage at these levels, net +0.52 sps. Step time also falls (25.4ms vs 30.6ms, no per-step quantile), final 83.16 vs 82.80 — best staged number. v12 now runs the frozen implementation (promoted from `submission_v13`, removed); the online-band numbers above are kept as history.
 
 ### v5 relative-q90 on real-30 (2026-09-18, Kaggle GPU, notebook §5c — 270 steps)
 
