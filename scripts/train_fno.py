@@ -106,7 +106,7 @@ class Config:
             padding=int(_env("FNO_PADDING", "6")),
             save_every=int(_env("SAVE_EVERY", "5")),
             save_optimizer=_bool_env("SAVE_OPTIMIZER", True),
-            wandb_project=_env("WANDB_PROJECT", "realpde-fno"),
+            wandb_project=_env("WANDB_PROJECT", "realpde-pretrain"),
             wandb_run_name=_env("WANDB_RUN_NAME", ""),
         )
 
@@ -286,8 +286,13 @@ def main() -> None:
         model.train()
         train_loss_sum = torch.zeros((), device=accelerator.device)
         train_elements = torch.zeros((), device=accelerator.device)
-        progress = tqdm(train_loader, disable=not accelerator.is_local_main_process,
-                        desc=f"Epoch {epoch:03d}", leave=False)
+        progress = tqdm(
+            train_loader,
+            disable=not accelerator.is_local_main_process,
+            desc=f"Train {epoch:03d}",
+            leave=True,
+            dynamic_ncols=True,
+        )
         optimizer.zero_grad(set_to_none=True)
         for inputs, targets in progress:
             inputs, targets = train_norm.preprocess(inputs, targets)
@@ -305,7 +310,10 @@ def main() -> None:
             train_elements += targets.numel()
             if accelerator.sync_gradients:
                 global_step += 1
-            progress.set_postfix(loss=f"{loss.item():.6f}")
+            progress.set_postfix(
+                loss=f"{loss.item():.6f}",
+                lr=f"{scheduler.get_last_lr()[0]:.2e}",
+            )
 
         train_totals = torch.stack((train_loss_sum, train_elements))
         train_totals = accelerator.reduce(train_totals, reduction="sum")
@@ -314,12 +322,22 @@ def main() -> None:
         model.eval()
         val_loss_sum = torch.zeros((), device=accelerator.device)
         val_elements = torch.zeros((), device=accelerator.device)
+        val_progress = tqdm(
+            val_loader,
+            disable=not accelerator.is_local_main_process,
+            desc=f"Val   {epoch:03d}",
+            leave=True,
+            dynamic_ncols=True,
+        )
         with torch.no_grad():
-            for inputs, targets in val_loader:
+            for inputs, targets in val_progress:
                 inputs, targets = val_norm.preprocess(inputs, targets)
                 predictions = model(inputs)
-                val_loss_sum += F.mse_loss(predictions, targets, reduction="sum")
+                batch_val_sum = F.mse_loss(predictions, targets, reduction="sum")
+                val_loss_sum += batch_val_sum
                 val_elements += targets.numel()
+                val_progress.set_postfix(
+                    loss=f"{(batch_val_sum / targets.numel()).item():.6f}")
         val_totals = accelerator.reduce(
             torch.stack((val_loss_sum, val_elements)), reduction="sum")
         val_loss = (val_totals[0] / val_totals[1].clamp_min(1)).item()
