@@ -11,6 +11,6 @@ ttt_steps: 1
 optimizer: sgd
 # Weight of the temporal-difference matching term:
 # loss = MSE(pred, tgt) + td_lambda * MSE(diff(pred), diff(tgt)).
-td_lambda: 0.3
+td_lambda: 1
 # Global grad-norm clip (0 disables).
 grad_clip: 0
