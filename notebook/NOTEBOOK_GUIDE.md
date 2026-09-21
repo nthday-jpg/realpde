@@ -17,8 +17,9 @@ heavy deps locally.
    `data` for local runs), with `{baseline,test,train_real,train_sim}/` directly
    underneath. `resolve_h5_dir()` handles flat (`train_sim/*.h5`) and nested
    (`train_sim/train_sim/*.h5`) layouts; checkpoints via `(root/'baseline').rglob()
-7. **Preload in processes**: `realpde.datasets.pde_dataset.ThreadPoolExecutor =
-   ProcessPoolExecutor` (h5py serializes threads; processes fix the 10% CPU issue).
+7. **Preload in processes**: `scripts/cache_dataset.py` automatically sets
+   `PDE_PRELOAD_BACKEND=process`; tune process count with `CACHE_WORKERS`
+   (h5py serializes threads, which otherwise causes roughly 10% CPU usage).
 8. **Work cells → save to `/kaggle/working/`** (only dir that persists/downloads).
 
 ## Notebooks

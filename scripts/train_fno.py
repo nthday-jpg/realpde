@@ -16,6 +16,7 @@ from pathlib import Path
 import torch
 import torch.nn.functional as F
 from accelerate import Accelerator
+from accelerate.utils import broadcast_object_list
 from torch.utils.data import DataLoader, Subset, TensorDataset
 from tqdm.auto import tqdm
 
@@ -114,7 +115,13 @@ class Config:
 def _load_data(cfg: Config, accelerator: Accelerator):
     cache = Path(cfg.data_cache) if cfg.data_cache else None
     if cache and cache.is_file():
-        blob = torch.load(cache, map_location="cpu", weights_only=False)
+        # mmap keeps the multi-GB tensor storage file-backed. DDP ranks then
+        # share the OS page cache instead of each allocating a full RAM copy.
+        try:
+            blob = torch.load(
+                cache, map_location="cpu", weights_only=False, mmap=True)
+        except TypeError:  # compatibility with older PyTorch releases
+            blob = torch.load(cache, map_location="cpu", weights_only=False)
         full = TensorDataset(blob["inputs"], blob["targets"])
         counts = ([tuple(item) for item in blob["file_counts"]]
                   if "file_counts" in blob else
@@ -138,14 +145,20 @@ def _load_data(cfg: Config, accelerator: Accelerator):
     if not train_idx or not val_idx:
         raise ValueError("The trajectory split produced an empty train or validation set")
 
-    if blob is not None:
-        train_norm = PDENormalizer.fit_from_samples(
-            blob["inputs"][train_idx], blob["targets"][train_idx])
-        val_norm = PDENormalizer.fit_from_samples(
-            blob["inputs"][val_idx], blob["targets"][val_idx])
-    else:
-        train_norm = PDENormalizer.fit_from_indexed(full, train_idx)
-        val_norm = PDENormalizer.fit_from_indexed(full, val_idx)
+    # Never use blob["inputs"][train_idx] here: advanced indexing materializes
+    # multi-GB copies, and fit_from_samples then converts them to float64. That
+    # can exceed Kaggle RAM, especially when every DDP rank loads the cache.
+    # Stream one window at a time on rank 0 and broadcast the four tiny stats
+    # tensors to the other ranks instead.
+    stats = [None, None]
+    if accelerator.is_main_process:
+        accelerator.print("[Norm] fitting streaming statistics on rank 0 ...")
+        train_norm_main = PDENormalizer.fit_from_indexed(full, train_idx)
+        val_norm_main = PDENormalizer.fit_from_indexed(full, val_idx)
+        stats = [train_norm_main.as_tuple(), val_norm_main.as_tuple()]
+    stats = broadcast_object_list(stats, from_process=0)
+    train_norm = PDENormalizer(*stats[0])
+    val_norm = PDENormalizer(*stats[1])
 
     common = {
         "num_workers": cfg.num_workers,

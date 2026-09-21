@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import os
 import random
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ProcessPoolExecutor, ThreadPoolExecutor
 from pathlib import Path
 from typing import List, Tuple
 
@@ -61,9 +61,11 @@ class PDEDataset(Dataset):
     sub_s : int
         Spatial subsampling factor (2 = downsample 64x128 to 32x64).
     preload_workers : int | None
-        Threads for parallel per-file preload (default: ``os.cpu_count()``
-        or ``PDE_PRELOAD_WORKERS`` env). 0/1 = serial. Capped at n_files;
-        ``executor.map`` preserves file order so sample order is deterministic.
+        Workers for parallel per-file preload (default: ``os.cpu_count()`` or
+        ``PDE_PRELOAD_WORKERS`` env). Set ``PDE_PRELOAD_BACKEND=process`` to
+        use processes (recommended for HDF5 cache construction); the default
+        is ``thread``. 0/1 = serial. Workers are capped at the file count and
+        ``executor.map`` preserves deterministic file/sample order.
     """
 
     def __init__(
@@ -105,7 +107,14 @@ class PDEDataset(Dataset):
                 for p in h5_files
             ]
         else:
-            with ThreadPoolExecutor(max_workers=workers) as ex:
+            backend = os.environ.get("PDE_PRELOAD_BACKEND", "thread").strip().lower()
+            if backend not in {"thread", "process"}:
+                raise ValueError(
+                    "PDE_PRELOAD_BACKEND must be 'thread' or 'process', "
+                    f"got {backend!r}"
+                )
+            executor_cls = ProcessPoolExecutor if backend == "process" else ThreadPoolExecutor
+            with executor_cls(max_workers=workers) as ex:
                 # executor.map preserves input order -> deterministic sample order
                 results = list(
                     ex.map(

@@ -9,8 +9,9 @@ Run once per split (plain python, CPU is fine):
     python scripts/cache_dataset.py            # env: DATA_PATH, CACHE_OUT, window knobs
 
 Config via env:
-    DATA_PATH   dir with .h5 files
-    CACHE_OUT   output .pt path, e.g. /kaggle/working/cache_train_sim.pt
+    DATA_PATH      dir with .h5 files
+    CACHE_OUT      output .pt path, e.g. /kaggle/working/cache_train_sim.pt
+    CACHE_WORKERS  HDF5 loader processes (default: all available CPUs)
     IN_STEP/OUT_STEP/INTERVAL/SUB_S (default 20/20/20/2)
 
 ~5GB fp32 for the full train_sim split (4900 windows x 2 x 20x32x64x3).
@@ -35,6 +36,11 @@ from realpde.datasets import PDEDataset, file_window_counts
 def main():
     data_path = os.environ.get("DATA_PATH", "data/train_sim")
     cache_out = os.environ.get("CACHE_OUT", "/kaggle/working/cache_train_sim.pt")
+    # h5py serializes much of threaded I/O, which leaves Kaggle CPUs mostly
+    # idle. Separate processes provide actual per-file parallelism.
+    os.environ["PDE_PRELOAD_BACKEND"] = "process"
+    os.environ["PDE_PRELOAD_WORKERS"] = os.environ.get(
+        "CACHE_WORKERS", str(os.cpu_count() or 4))
     kw = dict(in_step=int(os.environ.get("IN_STEP", 20)),
               out_step=int(os.environ.get("OUT_STEP", 20)),
               interval=int(os.environ.get("INTERVAL", 20)),
@@ -45,6 +51,7 @@ def main():
         return
 
     t0 = time.time()
+    print(f"[cache] loading with {os.environ['PDE_PRELOAD_WORKERS']} processes")
     ds = PDEDataset(data_path, **kw)
     print(f"[cache] {len(ds)} windows from {data_path} "
           f"({time.time()-t0:.0f}s to read) — stacking...")
