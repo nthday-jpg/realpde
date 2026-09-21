@@ -4,7 +4,7 @@
 # which carries no architecture hint for load_baseline.
 base_model: fno
 # Full-parameter optimizer learning rate (every ttt_step with a revealed pair).
-ttt_lr: 0.001
+ttt_lr: 0.01
 # Inner gradient steps per ttt_step ("full update" vs v9/v10's single step).
 ttt_steps: 1
 # Optimizer on all weights: sgd | adam.

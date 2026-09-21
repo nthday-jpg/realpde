@@ -263,7 +263,7 @@ def evaluate_submission(submission_dir: Path, data_dir: Path, device: str = "cpu
     n_traj, channels, mean_t, rel_l2, tke, mvpe, sps_raw, coverage,
     mean_nil, mean_exp_neg_nil, sps_dm, sps_tke, sps_mvpe, sps_score,
     subscores{rel_l2_score,tke_score,mvpe_score,time_score,sps_score},
-    final_score, n_cal, mean_adapt_loss.
+    final_score, n_cal, mean_losses, n_losses, mean_adapt_loss.
     """
     stats_path = data_dir / "mean_std_real.pt"
     if not stats_path.exists():
@@ -279,7 +279,8 @@ def evaluate_submission(submission_dir: Path, data_dir: Path, device: str = "cpu
             raise SystemExit(f"get_ttt_model() returned an object lacking {attr}().")
 
     per_step_times, preds, tgts = [], [], []
-    lo_raw, hi_raw, adapt_losses = [], [], []  # per-step denormalized bounds / adapt_loss
+    lo_raw, hi_raw = [], []  # per-step denormalized bounds
+    losses: dict[str, list[float]] = {}  # every scalar info key ending in "_loss"
     prev_pair = None  # (inp_norm, tgt_norm) of the previous step
     expected_shape = None
 
@@ -309,11 +310,14 @@ def evaluate_submission(submission_dir: Path, data_dir: Path, device: str = "cpu
             )
         if not isinstance(info, dict) or "adapt_loss" not in info:
             raise SystemExit('ttt_step must return (pred, info) with info["adapt_loss"].')
-        if info.get("adapt_loss") is not None:
-            try:
-                adapt_losses.append(float(info["adapt_loss"]))
-            except (TypeError, ValueError):
-                pass
+        # Collect all scalar losses exposed by the submission, not only the
+        # contract-required adapt_loss (for example mse_loss and td_loss).
+        for key, value in info.items():
+            if key.endswith("_loss") and value is not None:
+                try:
+                    losses.setdefault(key, []).append(float(value))
+                except (TypeError, ValueError):
+                    pass
 
         pred_raw = normalizer.postprocess_pred(pred_norm.detach())
         preds.append(pred_raw.squeeze(0).cpu().numpy().astype(np.float32))
@@ -353,6 +357,8 @@ def evaluate_submission(submission_dir: Path, data_dir: Path, device: str = "cpu
         "sps_score": official.score_sps(parts["sps_raw"]),
     }
     final = float(np.mean(list(subscores.values())))
+    mean_losses = {key: float(np.mean(values)) for key, values in losses.items() if values}
+    n_losses = {key: len(values) for key, values in losses.items() if values}
 
     return {
         "n_steps": len(stream),
@@ -375,8 +381,11 @@ def evaluate_submission(submission_dir: Path, data_dir: Path, device: str = "cpu
         "subscores": subscores,
         "final_score": final,
         "n_cal": n_cal,
-        "mean_adapt_loss": float(np.mean(adapt_losses)) if adapt_losses else None,
-        "n_adapt_loss": len(adapt_losses),
+        "mean_losses": mean_losses,
+        "n_losses": n_losses,
+        # Backward-compatible aliases used by existing notebooks.
+        "mean_adapt_loss": mean_losses.get("adapt_loss"),
+        "n_adapt_loss": n_losses.get("adapt_loss", 0),
     }
 
 
@@ -423,9 +432,9 @@ def main() -> None:
     print(f"[local_eval] sps branches: dm {m['sps_dm']:.6f} "
           f"tke {m['sps_tke']:.6f} mvpe {m['sps_mvpe']:.6f} "
           f"(weights {SPS_WEIGHT_DM:.1f}/{SPS_WEIGHT_TKE:.1f}/{SPS_WEIGHT_MVPE:.1f})")
-    if m["mean_adapt_loss"] is not None:
-        print(f"[local_eval] mean adapt_loss: {m['mean_adapt_loss']:.6f} "
-              f"(over {m['n_adapt_loss']} steps)")
+    for name, value in m["mean_losses"].items():
+        print(f"[local_eval] mean {name}: {value:.6f} "
+              f"(over {m['n_losses'][name]} steps)")
     if args.json_out:
         import json
         out = Path(args.json_out)
