@@ -218,6 +218,92 @@ def _build_model(cfg: Config, sample):
     return model
 
 
+def _scoring_metric_totals(pred: torch.Tensor, target: torch.Tensor,
+                           sub_s_real: int = 2) -> torch.Tensor:
+    """Return additive raw-space validation totals matching ``scoring.py``.
+
+    The dataset always has measured ``u,v`` plus a zero-filled ``p`` channel,
+    so scoring uses the first two channels. SPS uses the scorer's fallback
+    interval (prediction +/- 5% of its absolute value).
+    """
+    c = min(2, pred.shape[-1])
+    p, t = pred[..., :c], target[..., :c]
+    batch = pred.shape[0]
+
+    p_flat, t_flat = p.reshape(batch, -1), t.reshape(batch, -1)
+    dm = (p_flat - t_flat).norm(dim=1) / t_flat.norm(dim=1).clamp_min(1e-8)
+
+    if c >= 2:
+        def kinetic_energy(x):
+            u, v = x[..., 0], x[..., 1]
+            u_prime = ((u - u.mean(dim=1, keepdim=True)) ** 2).mean(dim=1)
+            v_prime = ((v - v.mean(dim=1, keepdim=True)) ** 2).mean(dim=1)
+            return 0.5 * (u_prime + v_prime)
+
+        pred_ke, target_ke = kinetic_energy(p), kinetic_energy(t)
+        tke = ((pred_ke - target_ke).reshape(batch, -1).norm(dim=1)
+               / target_ke.reshape(batch, -1).norm(dim=1).clamp_min(1e-8))
+    else:
+        tke = torch.zeros_like(dm)
+
+    # Mean velocity profile error at the same probes as scoring.py.
+    d, center_x, center_y, n_probe = 16, 10, 32, 9
+    h, w = pred.shape[2], pred.shape[3]
+    probe_center_y = int(center_y / sub_s_real)
+    interval_y = min(2, int(h / (n_probe + 1)))
+    probe_y = [
+        probe_center_y + interval_y * j
+        for j in range(-(n_probe - 1) // 2,
+                       n_probe - (n_probe - 1) // 2)
+    ]
+    probe_y = [y for y in probe_y if 0 <= y < h]
+    mvpe_parts = []
+    if c >= 2 and probe_y:
+        for i in range(4):
+            if int((2 * d + center_x) / sub_s_real) < w:
+                probe_x = int(((i + 1) * d + center_x) / sub_s_real)
+            else:
+                probe_x = int((0.5 * (i + 2) * d + center_x) / sub_s_real)
+            if not 0 <= probe_x < w:
+                continue
+            pp = p[:, :, probe_y, probe_x, :2].mean(dim=1).reshape(batch, -1)
+            tt = t[:, :, probe_y, probe_x, :2].mean(dim=1).reshape(batch, -1)
+            mvpe_parts.append(
+                (pp - tt).norm(dim=1) / tt.norm(dim=1).clamp_min(1e-8))
+    mvpe = (torch.stack(mvpe_parts).mean(dim=0) if mvpe_parts
+            else torch.zeros_like(dm))
+
+    # SPS fallback bounds and branch aggregation from scoring.py.
+    lower = p - 0.05 * p.abs()
+    upper = p + 0.05 * p.abs()
+    inside = (t >= lower) & (t <= upper)
+    nil = (upper - lower) / 0.0563870259
+
+    def sps_branch(error):
+        pm = error / (0.5 + error)
+        shaped = pm.reshape((batch,) + (1,) * (p.ndim - 1))
+        elem = (1.0 - shaped) * torch.exp(-nil)
+        return torch.where(inside, elem, torch.zeros_like(elem)).sum()
+
+    return torch.stack([
+        ((p - t) ** 2).sum(),
+        p.new_tensor(p.numel()),
+        dm.sum(),
+        tke.sum(),
+        mvpe.sum(),
+        p.new_tensor(batch),
+        sps_branch(dm),
+        sps_branch(tke),
+        sps_branch(mvpe),
+        inside.sum().to(dtype=p.dtype),
+        p.new_tensor(p.numel()),
+    ])
+
+
+def _error_score(error: float) -> float:
+    return 100.0 / (1.0 + 0.5 * max(error, 0.0))
+
+
 def _checkpoint(cfg, accelerator, model, optimizer, scheduler, epoch, global_step,
                 train_loss, val_loss, train_norm, val_norm):
     state = {
@@ -335,6 +421,9 @@ def main() -> None:
         model.eval()
         val_loss_sum = torch.zeros((), device=accelerator.device)
         val_elements = torch.zeros((), device=accelerator.device)
+        # raw MSE/count, DM/TKE/MVPE sums/count, three SPS branch sums,
+        # coverage count, SPS element count
+        score_totals = torch.zeros(11, device=accelerator.device)
         val_progress = tqdm(
             val_loader,
             disable=not accelerator.is_local_main_process,
@@ -344,27 +433,64 @@ def main() -> None:
         )
         with torch.no_grad():
             for inputs, targets in val_progress:
+                targets_raw = targets
                 inputs, targets = val_norm.preprocess(inputs, targets)
                 predictions = model(inputs)
                 batch_val_sum = F.mse_loss(predictions, targets, reduction="sum")
                 val_loss_sum += batch_val_sum
                 val_elements += targets.numel()
+
+                predictions_raw = val_norm.postprocess_pred(predictions)
+                batch_scores = _scoring_metric_totals(
+                    predictions_raw, targets_raw, sub_s_real=cfg.sub_s)
+                score_totals += batch_scores
+                batch_rel_l2 = (batch_scores[2] / batch_scores[5].clamp_min(1)).item()
                 val_progress.set_postfix(
-                    loss=f"{(batch_val_sum / targets.numel()).item():.6f}")
+                    loss=f"{(batch_val_sum / targets.numel()).item():.6f}",
+                    rel_l2=f"{batch_rel_l2:.4f}",
+                )
         val_totals = accelerator.reduce(
             torch.stack((val_loss_sum, val_elements)), reduction="sum")
+        score_totals = accelerator.reduce(score_totals, reduction="sum")
         val_loss = (val_totals[0] / val_totals[1].clamp_min(1)).item()
+        val_raw_mse = (score_totals[0] / score_totals[1].clamp_min(1)).item()
+        val_rel_l2 = (score_totals[2] / score_totals[5].clamp_min(1)).item()
+        val_tke = (score_totals[3] / score_totals[5].clamp_min(1)).item()
+        val_mvpe = (score_totals[4] / score_totals[5].clamp_min(1)).item()
+        sps_dm = (score_totals[6] / score_totals[10].clamp_min(1)).item()
+        sps_tke = (score_totals[7] / score_totals[10].clamp_min(1)).item()
+        sps_mvpe = (score_totals[8] / score_totals[10].clamp_min(1)).item()
+        val_sps = 0.5 * sps_dm + 0.3 * sps_tke + 0.2 * sps_mvpe
+        val_coverage = (score_totals[9] / score_totals[10].clamp_min(1)).item()
+        rel_l2_score = _error_score(val_rel_l2)
+        tke_score = _error_score(val_tke)
+        mvpe_score = _error_score(val_mvpe)
+        sps_score = 100.0 / (1.0 + math.exp(-max(-60.0, min(60.0, val_sps))))
 
         metrics = {
             "epoch": epoch,
             "train_loss": train_loss,
             "val_loss": val_loss,
+            "val_raw_mse": val_raw_mse,
+            "val_rel_l2": val_rel_l2,
+            "val_tke_rel_l2": val_tke,
+            "val_mvpe_rel_l2": val_mvpe,
+            "val_sps": val_sps,
+            "val_coverage": val_coverage,
+            "val_rel_l2_score": rel_l2_score,
+            "val_tke_score": tke_score,
+            "val_mvpe_score": mvpe_score,
+            "val_sps_score": sps_score,
+            "val_quality_score": (rel_l2_score + tke_score + mvpe_score + sps_score) / 4.0,
             "lr": scheduler.get_last_lr()[0],
         }
         if cfg.wandb_project:
             accelerator.log(metrics, step=global_step)
         accelerator.print(
             f"Epoch {epoch:03d} | train {train_loss:.6f} | val {val_loss:.6f} "
+            f"| raw MSE {val_raw_mse:.6f} | rel-L2 {val_rel_l2:.4f} "
+            f"| TKE {val_tke:.4f} | MVPE {val_mvpe:.4f} "
+            f"| SPS {val_sps:.4f} | quality {metrics['val_quality_score']:.2f} "
             f"| lr {metrics['lr']:.3e}" + (" <-- best" if val_loss < best_val else ""))
 
         accelerator.wait_for_everyone()
