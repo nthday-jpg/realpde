@@ -74,7 +74,6 @@ class Config:
     n_layers: int
     width: int
     padding: int
-    save_every: int
     save_optimizer: bool
     log_every_steps: int
     wandb_project: str
@@ -107,7 +106,6 @@ class Config:
             n_layers=int(_env("FNO_N_LAYERS")),
             width=int(_env("FNO_WIDTH")),
             padding=int(_env("FNO_PADDING")),
-            save_every=int(_env("SAVE_EVERY")),
             save_optimizer=_bool_env("SAVE_OPTIMIZER"),
             log_every_steps=int(_env("LOG_EVERY_STEPS")),
             wandb_project=_env("WANDB_PROJECT"),
@@ -570,8 +568,6 @@ def main() -> None:
             if val_loss < best_val:
                 best_val = val_loss
                 accelerator.save(state, save_dir / "best.pth")
-            if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
-                accelerator.save(state, save_dir / f"epoch_{epoch:03d}.pth")
         accelerator.wait_for_everyone()
 
     accelerator.print(f"Done. Best validation MSE: {best_val:.6f}; outputs: {save_dir}")
