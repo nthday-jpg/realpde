@@ -18,7 +18,8 @@ Usage:
 
 The data layout mirrors CompetitionAirfoil(mode="test", dataset_type="real"):
     <data>/test_real/*.h5      (flat u, v[, p] datasets, native 64x128)
-    <data>/mean_std_real.pt    (mean_inputs, mean_targets, std_inputs, std_targets)
+    <data>/mean_std_real.pt    official train_real statistics
+                               (mean_inputs, mean_targets, std_inputs, std_targets)
 """
 
 from __future__ import annotations
@@ -265,6 +266,8 @@ def evaluate_submission(submission_dir: Path, data_dir: Path, device: str = "cpu
     subscores{rel_l2_score,tke_score,mvpe_score,time_score,sps_score},
     final_score, n_cal, mean_losses, n_losses, mean_adapt_loss.
     """
+    # Despite the filename, the competition contract defines these as frozen
+    # official train_real statistics, not statistics fitted on this test stream.
     stats_path = data_dir / "mean_std_real.pt"
     if not stats_path.exists():
         raise SystemExit(f"Missing {stats_path}. Run example_data/make_example.py first.")

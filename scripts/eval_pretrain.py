@@ -3,9 +3,10 @@
 
 Scores a UNet (or any checkpoint saved by ``scripts/trainer.py``) on a
 PDEDataset split — reports MSE and relative-L2 in *raw* space (the same
-formula the leaderboard uses). The model runs in normalized space (per-split
-stats, fit on the eval split only — no train stats leak in) and predictions
-are denormalized before scoring, so ``val_loss``-style normalized numbers and
+formula the leaderboard uses). The model runs in normalized space using frozen
+training statistics, matching the competition's official ``train_real``
+normalization. Predictions are denormalized before scoring, so
+``val_loss``-style normalized numbers and
 raw leaderboard-style numbers are both reported. Optionally compares against
 the CNO baseline from /kaggle/input/realpde/baseline/.
 
@@ -77,7 +78,7 @@ def main():
     ap.add_argument("--split", choices=["val", "full"], default="val", help="val = trajectory holdout (same as trainer), full = all samples")
     ap.add_argument("--val-frac", type=float, default=None, help="val file fraction (default: ckpt cfg VAL_FRAC or 0.1)")
     ap.add_argument("--seed", type=int, default=None, help="trajectory split seed (default: ckpt cfg SEED or 42)")
-    ap.add_argument("--use-ckpt-stats", action="store_true", help="use norm_val saved in the ckpt instead of fitting stats on the eval split")
+    ap.add_argument("--use-ckpt-stats", action="store_true", help="deprecated compatibility flag; training checkpoint statistics are always used")
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--in-step", type=int, default=20)
     ap.add_argument("--out-step", type=int, default=20)
@@ -125,7 +126,7 @@ def main():
         seed = args.seed if args.seed is not None else int(cfg.get("seed", os.environ.get("SEED", 42)))
         counts = file_window_counts(data_path, in_step, out_step, interval)
         assert sum(n for _, n in counts) == len(full_ds), "file counts disagree with dataset length"
-        _, val_idx = trajectory_split_indices(counts, val_frac, seed)
+        train_idx, val_idx = trajectory_split_indices(counts, val_frac, seed)
         val_ds = Subset(full_ds, val_idx)
         print(f"[eval] split: val ({len(val_idx)}/{len(full_ds)} windows by trajectory, frac={val_frac} seed={seed})")
     else:
@@ -133,19 +134,23 @@ def main():
         val_ds = full_ds
         print(f"[eval] split: full ({len(full_ds)} samples)")
 
-    # --- Normalization: fit on the EVAL split only (no train leakage) --------
-    # The model was trained in normalized space, so eval inputs must be
-    # normalized too; predictions are denormalized before raw-space scoring.
-    norm = None
-    if args.use_ckpt_stats:
-        norm = PDENormalizer.from_ckpt(obj, "norm_val")
-        if norm is None:
-            print("[eval] WARNING: --use-ckpt-stats but ckpt has no norm_val; fitting on eval split instead")
+    # --- Normalization: frozen training statistics ---------------------------
+    # The competition normalizes evaluation with official train_real stats.
+    # Prefer the checkpoint's training transform and never fit on held-out
+    # inputs/targets. Old checkpoints without stats can reconstruct them only
+    # when the trajectory training split is available.
+    norm = PDENormalizer.from_ckpt(obj, "norm_train")
     if norm is None:
-        norm = PDENormalizer.fit_from_indexed(full_ds, val_idx)
-        print(f"[eval] norm (fit on eval {args.split} split): {norm.describe()}")
+        if args.split != "val":
+            raise SystemExit(
+                "Checkpoint has no norm_train; cannot evaluate --split full "
+                "without known training statistics")
+        print("[eval] WARNING: checkpoint has no norm_train; reconstructing "
+              "statistics from training trajectories")
+        norm = PDENormalizer.fit_from_indexed(full_ds, train_idx)
+        print(f"[eval] norm (fit on train split): {norm.describe()}")
     else:
-        print(f"[eval] norm (from ckpt norm_val): {norm.describe()}")
+        print(f"[eval] norm (from ckpt norm_train): {norm.describe()}")
 
     loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False, num_workers=0)
     model, _, _ = build_unet_from_ckpt(ckpt_path, args.device)

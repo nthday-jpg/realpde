@@ -6,10 +6,11 @@ or environment before launch).  Supports teacher-forcing pretraining with
 configurable in/out step windows and multiple model architectures.
 
 Models train in NORMALIZED space (per-channel Gaussian, same convention as
-``local_eval.py``): train stats are fit on train files only, val stats on val
-files only, so no val information leaks into training. Checkpoints carry both
-``norm_train``/``norm_val`` tuples plus ``SAVE_DIR/mean_std_{train,val}.pt``
-files in the official ``mean_std_*.pt`` layout.
+``local_eval.py``). Statistics are fitted after the trajectory split using
+training files only, then reused unchanged for validation. This mirrors the
+competition evaluator, which uses frozen official ``train_real`` statistics.
+For compatibility, checkpoints and ``mean_std_{train,val}.pt`` expose both
+names, but both contain the training-only statistics.
 
 Config variables (set in notebook or environment before launch):
     DATA_PATH       : str   – path to directory with .h5 files
@@ -123,22 +124,22 @@ def main():
         print(f"[Split] {len(counts)} files -> train {len(train_idx)} windows / "
               f"val {len(val_idx)} windows (by trajectory, seed={seed})")
 
-    # --- Normalization (no leakage: each split fits its own stats) -----------
-    # Train stats see train windows only; val stats see val windows only.
+    # --- Normalization (fit after split, on training data only) --------------
+    # The competition uses frozen official train_real statistics throughout
+    # evaluation. Likewise, validation uses the training transform; fitting on
+    # validation inputs or targets would expose held-out distribution data.
     # Loss is computed in normalized space; raw-space metrics need
     # PDENormalizer.postprocess_pred (see scripts/eval_pretrain.py).
     if accelerator.is_main_process:
-        print("[Norm] fitting per-split stats (train on train windows, "
-              "val on val windows) ...")
+        print("[Norm] fitting statistics on training windows only ...")
     train_norm = PDENormalizer.fit_from_indexed(full_dataset, train_idx)
-    val_norm = PDENormalizer.fit_from_indexed(full_dataset, val_idx)
+    val_norm = train_norm  # compatibility name; deliberately training stats
     if accelerator.is_main_process:
-        print(f"[Norm] train {train_norm.describe()}")
-        print(f"[Norm] val   {val_norm.describe()}")
+        print(f"[Norm] train (also used for val) {train_norm.describe()}")
         os.makedirs(save_dir, exist_ok=True)
         train_norm.save(os.path.join(save_dir, "mean_std_train.pt"))
-        val_norm.save(os.path.join(save_dir, "mean_std_val.pt"))
-        print(f"[Norm] saved mean_std_train.pt / mean_std_val.pt -> {save_dir}/")
+        train_norm.save(os.path.join(save_dir, "mean_std_val.pt"))
+        print(f"[Norm] saved training-only stats under train/val names -> {save_dir}/")
 
     # --- DataLoader workers: use maximum sensible, allow override via NUM_WORKERS ---
     _num_workers_env = os.environ.get("NUM_WORKERS", "").strip()

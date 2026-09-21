@@ -152,16 +152,18 @@ def _load_data(cfg: Config, accelerator: Accelerator):
     # multi-GB copies, and fit_from_samples then converts them to float64. That
     # can exceed Kaggle RAM, especially when every DDP rank loads the cache.
     # Stream one window at a time on rank 0 and broadcast the four tiny stats
-    # tensors to the other ranks instead.
-    stats = [None, None]
+    # tensors to the other ranks instead. Fit only on training indices after
+    # splitting, then reuse the transform for validation. This mirrors the
+    # evaluator's frozen official train_real normalization.
+    stats = [None]
     if accelerator.is_main_process:
-        accelerator.print("[Norm] fitting streaming statistics on rank 0 ...")
+        accelerator.print(
+            "[Norm] fitting training-only streaming statistics on rank 0 ...")
         train_norm_main = PDENormalizer.fit_from_indexed(full, train_idx)
-        val_norm_main = PDENormalizer.fit_from_indexed(full, val_idx)
-        stats = [train_norm_main.as_tuple(), val_norm_main.as_tuple()]
+        stats = [train_norm_main.as_tuple()]
     stats = broadcast_object_list(stats, from_process=0)
     train_norm = PDENormalizer(*stats[0])
-    val_norm = PDENormalizer(*stats[1])
+    val_norm = train_norm  # compatibility name; validation uses train stats
 
     common = {
         "num_workers": cfg.num_workers,
@@ -413,7 +415,8 @@ def main() -> None:
     if accelerator.is_main_process:
         save_dir.mkdir(parents=True, exist_ok=True)
         train_norm.save(save_dir / "mean_std_train.pt")
-        val_norm.save(save_dir / "mean_std_val.pt")
+        # Legacy filename retained for consumers expecting both files.
+        train_norm.save(save_dir / "mean_std_val.pt")
         if cfg.wandb_project:
             accelerator.init_trackers(
                 cfg.wandb_project,

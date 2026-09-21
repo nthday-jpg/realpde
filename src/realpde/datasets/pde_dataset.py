@@ -39,6 +39,11 @@ class PDEDataset(Dataset):
     """HDF5 dataset for PDE velocity field sequences with full preloading.
 
     Loads all ``.h5`` files into memory at init time for fast training.
+    Samples remain in raw, unnormalized units. Normalization statistics must
+    be fitted externally *after* the trajectory split, using training indices
+    only, and then reused for validation/test data. This matches the competition
+    evaluator's use of frozen official ``train_real`` statistics.
+
     Each file contains ``u``, ``v``, ``p`` datasets of shape
     ``(T, H_native, W_native)``.  Spatial subsampling (``sub_s``) is applied
     at load time to reduce native ``64 x 128`` PIV grids to ``32 x 64``.

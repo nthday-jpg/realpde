@@ -20,10 +20,11 @@ the raw 0 is preserved on disk.
 
 No-leakage rule
 ---------------
-Stats for the train split are fit on train files/windows only, stats for the
-val (or test) split on that split only — never pool across splits. The helpers
-here make that the default path: fit from an explicit index list
-(:meth:`PDENormalizer.fit_from_samples`) so each split gets its own object.
+Split trajectories first, fit statistics on training files/windows only, and
+reuse that frozen transform for validation and test data. This mirrors the
+competition evaluator, which normalizes the stream with official ``train_real``
+statistics rather than statistics from hidden evaluation trajectories. The
+indexed helper supports fitting after the split without materializing a subset.
 """
 from __future__ import annotations
 
@@ -114,8 +115,8 @@ class PDENormalizer:
         """Fit on ``dataset[i] -> (input, target)`` pairs for ``indices`` only.
 
         Streams one sample at a time (no stacking), so it is safe for the full
-        ``train_sim`` split. Fit the train normalizer on train indices and the
-        val normalizer on val indices — never on the union.
+        ``train_sim`` split. Pass training indices after splitting, then reuse
+        the returned normalizer for validation and test data.
         """
         idx = list(indices)
         return cls.fit_from_samples(

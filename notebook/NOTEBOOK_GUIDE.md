@@ -27,7 +27,7 @@ heavy deps locally.
 | Notebook | Purpose | Key CONFIG | Output |
 |---|---|---|---|
 | `baseline_kaggle.ipynb` | Score all 8 shipped baselines, 4 settings (A sim→sim, B sim→real zero-shot, C finetuned→real, D finetuned→sim). Real eval = `train_real/` only, 40% of files (seeded-shuffled, staged symlinks in `/tmp/realpde_sub/`, cached). Direct teacher-forcing, raw-space MSE + rel-L2. | `BASELINE_BATCH_SIZE=4`, `BASELINE_SAMPLE_FRAC=0.4`, `PREFER_FP16_FNO=1`, `FILE_SEED=42` | `/kaggle/working/baseline_matrix.csv` |
-| `pretrain_kaggle.ipynb` | Train `unet` from scratch via `scripts/trainer.py` + `accelerate launch` (multi-GPU OK), then `scripts/eval_pretrain.py` + `local_eval.py` smoke tests. Normalizes with per-split stats (no leakage); ckpts carry `norm_train`/`norm_val` + `mean_std_{train,val}.pt`. | `DATA_PATH`, `MODEL_NAME=unet`, `LR=1e-3`, `EPOCHS=50`, `VAL_FRAC=0.1`, `SEED=42`, `SAVE_DIR=/kaggle/working/checkpoints` | `checkpoints/{best,final,epoch_NNN}.pth` |
+| `pretrain_kaggle.ipynb` | Train `unet` from scratch via `scripts/trainer.py` + `accelerate launch` (multi-GPU OK), then `scripts/eval_pretrain.py` + `local_eval.py` smoke tests. Fits stats on training trajectories and freezes them for validation; ckpts carry compatibility `norm_train`/`norm_val` + `mean_std_{train,val}.pt` aliases. | `DATA_PATH`, `MODEL_NAME=unet`, `LR=1e-3`, `EPOCHS=50`, `VAL_FRAC=0.1`, `SEED=42`, `SAVE_DIR=/kaggle/working/checkpoints` | `checkpoints/{best,final,epoch_NNN}.pth` |
 | `train_fno_kaggle.ipynb` | Train a configurable `FNO3d` from scratch or resume a compatible checkpoint via `scripts/train_fno.py` + HF Accelerate. Architecture, optimizer, windows, checkpointing, and optional W&B settings are all in one CONFIG cell. | `FNO_MODES{1,2,3}=4,12,16`, `FNO_N_LAYERS=4`, `FNO_WIDTH=64`, `FNO_PADDING=6`, `LR=1e-4`, `BATCH_SIZE=1`, `GRAD_ACCUM_STEPS=4` | `fno_checkpoints/{best,last,epoch_NNN}.pth` + normalization stats |
 | `continue_cno_kaggle.ipynb` | **CNO-sim undertrained check**: thin launcher for `scripts/finetune_baseline.py` via `accelerate launch`. Run A resumes shipped `sim_cno.pth` **on `train_sim`** (same distribution — falling val = undertrained); optional Run B finetunes same ckpt on `train_real/`. Verdict cell scores shipped vs continued with the baseline scorer. | `SIM_CNO` (auto), `LR=1e-4`, `EPOCHS=20`, `BATCH_SIZE=2` (1 if OOM), `SAVE_DIR=/kaggle/working/cno_sim_resume` (+ `cno_real_ft`), `REAL_DATA_PATH` (+ `REAL_FRAC=0.2`) for the built-in post-train test (continued-best vs before-train on real) | `cno_sim_resume/{best,final,last}.pth` |
 | `inspect_*.ipynb`, `visualize.ipynb` | Dataset inspection/plots, CPU-OK. | — | figures only |
@@ -40,8 +40,8 @@ heavy deps locally.
   env config and launch `accelerate`. Copy `continue_cno_kaggle.ipynb` (finetune pattern) or `pretrain_kaggle.ipynb`
   (`accelerate` pattern); keep cells 1–6 identical so datasets/mounts keep working.
 - All training/eval runs in normalized space (`src/realpde/datasets/normalizer.py:PDENormalizer`,
-  same convention as `local_eval.py`): train stats fit on train files only, val/test stats on
-  that split only — never pool splits. Loss is normalized-space MSE; leaderboard-style metrics
+  same convention as `local_eval.py`): fit statistics on training files only and reuse that
+  frozen transform for val/test, matching the official train_real normalization. Loss is normalized-space MSE; leaderboard-style metrics
   are always denormalized to raw space first (`postprocess_pred`).
 - Config **only** via `os.environ.setdefault(...)` in one CONFIG cell.
 - Save checkpoints as `{'model_state_dict': ..., 'epoch': ..., 'val_loss': ...}`

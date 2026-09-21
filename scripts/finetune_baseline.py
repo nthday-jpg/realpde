@@ -58,7 +58,7 @@ def _cfg(key, default=None):
 
 def _test_on_real(real_data, continued_ckpt, before_ckpt, model_type,
                  in_step, out_step, interval, sub_s, batch_size,
-                 save_dir, accelerator):
+                 save_dir, accelerator, train_norm):
     """Score continued-best vs before-train ckpt on REAL_FRAC of real files.
 
     Reports raw-space MSE + rel-L2 (same formula as baseline_kaggle.ipynb).
@@ -96,11 +96,10 @@ def _test_on_real(real_data, continued_ckpt, before_ckpt, model_type,
                          interval=interval, sub_s=sub_s)
     loader = _DataLoader(eval_ds, batch_size=eval_batch, shuffle=False)
     print(f"[RealTest] {len(eval_ds)} windows, batch={eval_batch}")
-    # Eval-split stats (fit on this staged real subset only — no train leakage);
-    # models run normalized, scores are denormalized to raw space.
-    from realpde.datasets import PDENormalizer as _PDN
-    _norm = _PDN.fit_from_indexed(eval_ds, range(len(eval_ds)))
-    print(f"[RealTest] norm {_norm.describe()}")
+    # Keep the training transform frozen. The competition likewise evaluates
+    # with official train_real statistics rather than hidden-test statistics.
+    _norm = train_norm
+    print(f"[RealTest] training norm {_norm.describe()}")
 
     accelerator.free_memory()  # drop train model/opt before loading eval models
     torch.cuda.empty_cache() if torch.cuda.is_available() else None
@@ -186,18 +185,12 @@ def main():
         "file counts disagree with dataset length (re-cache if knobs changed)"
     train_idx, val_idx = trajectory_split_indices(counts, val_frac, seed)
     train_ds, val_ds = Subset(full, train_idx), Subset(full, val_idx)
-    # Per-split normalization (no leakage): train stats on train windows only,
-    # val stats on val windows only. Baselines train in normalized space.
-    if blob is not None:
-        ins, tgts = blob["inputs"], blob["targets"]
-        train_norm = PDENormalizer.fit_from_samples(ins[train_idx], tgts[train_idx])
-        val_norm = PDENormalizer.fit_from_samples(ins[val_idx], tgts[val_idx])
-    else:
-        train_norm = PDENormalizer.fit_from_indexed(full, train_idx)
-        val_norm = PDENormalizer.fit_from_indexed(full, val_idx)
+    # Fit after splitting, on training windows only, and keep the transform
+    # frozen for validation. Baselines train in normalized space.
+    train_norm = PDENormalizer.fit_from_indexed(full, train_idx)
+    val_norm = train_norm  # compatibility name; validation uses train stats
     if accelerator.is_main_process:
-        print(f"[Norm] train {train_norm.describe()}")
-        print(f"[Norm] val   {val_norm.describe()}")
+        print(f"[Norm] train (also used for val) {train_norm.describe()}")
     if accelerator.is_main_process:
         print(f"[Split] {len(counts)} files -> train {len(train_idx)} windows / "
               f"val {len(val_idx)} windows (by trajectory, seed={seed})")
@@ -319,7 +312,7 @@ def main():
                  "norm_train": train_norm.as_tuple(),
                  "norm_val": val_norm.as_tuple()}
         train_norm.save(os.path.join(save_dir, "mean_std_train.pt"))
-        val_norm.save(os.path.join(save_dir, "mean_std_val.pt"))
+        train_norm.save(os.path.join(save_dir, "mean_std_val.pt"))
         torch.save(state, os.path.join(save_dir, "final.pth"))
         print(f"Done. best val {best_val:.6f} -> {save_dir}/best.pth")
 
@@ -331,7 +324,7 @@ def main():
         if real_data and os.path.isdir(real_data):
             _test_on_real(real_data, os.path.join(save_dir, "best.pth"),
                            resume, model_type, in_step, out_step, interval,
-                           sub_s, batch_size, save_dir, accelerator)
+                           sub_s, batch_size, save_dir, accelerator, train_norm)
         elif real_data:
             print(f"[RealTest] skip: not a dir: {real_data}")
         else:
