@@ -2,7 +2,7 @@
 # Resolution for base_model: this file > BASE_MODEL env > default "cno".
 # Needed because the staged checkpoint is renamed to model.pth,
 # which carries no architecture hint for load_baseline.
-base_model: cno
+base_model: fno
 # Full-parameter optimizer learning rate (every ttt_step with a revealed pair).
 ttt_lr: 0.001
 # Inner gradient steps per ttt_step ("full update" vs v9/v10's single step).
