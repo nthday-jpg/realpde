@@ -3,7 +3,7 @@
 
 The companion ``notebook/train_fno_kaggle.ipynb`` owns the user-facing
 configuration and launches this script with ``accelerate launch``. All options
-can also be supplied as environment variables; see ``Config.from_env``.
+must be supplied as environment variables; see ``Config.from_env``.
 """
 from __future__ import annotations
 
@@ -35,12 +35,12 @@ from realpde.datasets import (  # noqa: E402
 from realpde.rpde_baselines.model.fno import FNO3d, SpectralConv3d  # noqa: E402
 
 
-def _env(name: str, default: str) -> str:
-    return os.environ.get(name, default)
+def _env(name: str) -> str:
+    return os.environ[name]
 
 
-def _bool_env(name: str, default: bool) -> bool:
-    value = _env(name, "1" if default else "0").strip().lower()
+def _bool_env(name: str) -> bool:
+    value = _env(name).strip().lower()
     if value in {"1", "true", "yes", "on"}:
         return True
     if value in {"0", "false", "no", "off"}:
@@ -83,35 +83,35 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         return cls(
-            data_path=_env("DATA_PATH", "data/train_sim"),
-            data_cache=_env("DATA_CACHE", ""),
-            save_dir=_env("SAVE_DIR", "/kaggle/working/fno_checkpoints"),
-            resume_ckpt=_env("RESUME_CKPT", ""),
-            in_step=int(_env("IN_STEP", "20")),
-            out_step=int(_env("OUT_STEP", "20")),
-            interval=int(_env("INTERVAL", "20")),
-            sub_s=int(_env("SUB_S", "2")),
-            val_frac=float(_env("VAL_FRAC", "0.1")),
-            seed=int(_env("SEED", "42")),
-            batch_size=int(_env("BATCH_SIZE", "1")),
-            num_workers=int(_env("NUM_WORKERS", "4")),
-            epochs=int(_env("EPOCHS", "50")),
-            lr=float(_env("LR", "1e-4")),
-            weight_decay=float(_env("WEIGHT_DECAY", "0")),
-            grad_accum_steps=int(_env("GRAD_ACCUM_STEPS", "1")),
-            max_grad_norm=float(_env("MAX_GRAD_NORM", "1.0")),
-            mixed_precision=_env("MIXED_PRECISION", "fp16" if torch.cuda.is_available() else "no"),
-            modes1=int(_env("FNO_MODES1", "4")),
-            modes2=int(_env("FNO_MODES2", "12")),
-            modes3=int(_env("FNO_MODES3", "16")),
-            n_layers=int(_env("FNO_N_LAYERS", "4")),
-            width=int(_env("FNO_WIDTH", "64")),
-            padding=int(_env("FNO_PADDING", "6")),
-            save_every=int(_env("SAVE_EVERY", "5")),
-            save_optimizer=_bool_env("SAVE_OPTIMIZER", True),
-            log_every_steps=int(_env("LOG_EVERY_STEPS", "10")),
-            wandb_project=_env("WANDB_PROJECT", "realpde-pretrain"),
-            wandb_run_name=_env("WANDB_RUN_NAME", ""),
+            data_path=_env("DATA_PATH"),
+            data_cache=_env("DATA_CACHE"),
+            save_dir=_env("SAVE_DIR"),
+            resume_ckpt=_env("RESUME_CKPT"),
+            in_step=int(_env("IN_STEP")),
+            out_step=int(_env("OUT_STEP")),
+            interval=int(_env("INTERVAL")),
+            sub_s=int(_env("SUB_S")),
+            val_frac=float(_env("VAL_FRAC")),
+            seed=int(_env("SEED")),
+            batch_size=int(_env("BATCH_SIZE")),
+            num_workers=int(_env("NUM_WORKERS")),
+            epochs=int(_env("EPOCHS")),
+            lr=float(_env("LR")),
+            weight_decay=float(_env("WEIGHT_DECAY")),
+            grad_accum_steps=int(_env("GRAD_ACCUM_STEPS")),
+            max_grad_norm=float(_env("MAX_GRAD_NORM")),
+            mixed_precision=_env("MIXED_PRECISION"),
+            modes1=int(_env("FNO_MODES1")),
+            modes2=int(_env("FNO_MODES2")),
+            modes3=int(_env("FNO_MODES3")),
+            n_layers=int(_env("FNO_N_LAYERS")),
+            width=int(_env("FNO_WIDTH")),
+            padding=int(_env("FNO_PADDING")),
+            save_every=int(_env("SAVE_EVERY")),
+            save_optimizer=_bool_env("SAVE_OPTIMIZER"),
+            log_every_steps=int(_env("LOG_EVERY_STEPS")),
+            wandb_project=_env("WANDB_PROJECT"),
+            wandb_run_name=_env("WANDB_RUN_NAME"),
         )
 
 
