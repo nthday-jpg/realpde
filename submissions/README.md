@@ -25,7 +25,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 | `submission_v10` | CNO via `load_baseline` | 1-step SGD + v4 q90 band every step | smoke OK (bounds 4/4) | ~30MB (with ckpt) | real-30 full row: final 74.71 (see Staged) |
 | `submission_v11` | CNO via `load_baseline` | 1-step SGD on LoRA adapters only (rank 4) | smoke OK (36 Conv3d, 329k LoRA params) | ~30MB (with ckpt) | pending Kaggle run |
 | `submission_v12` | FNO via `load_baseline` | none + frozen q90 band (online warmup, then reuse) | rel-L2 82.4, sps 51.5 (warmup path, 4/4 steps), final 61.8 | ~201MB (fp16 ckpt) | evaluated (smoke); real-30 final 83.16, sps 61.05 (see Staged) |
-| `submission_v14` | CNO via `load_baseline` | full update (3×SGD, all weights, MSE + TD reg), no bounds (default band) | smoke OK (default band) | ~30MB (with ckpt) | pending Kaggle run |
+| `submission_v14` | FNO via `load_baseline` | full update (1×Adam, all weights, MSE + TD reg), no bounds (default band) | smoke OK (default band) | ~403MB (fp32 ckpt) | real-30: Adam lr=0.005, TD=1 final 75.82 (see Staged) |
 
 ## Changelog
 
@@ -41,7 +41,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 - v13 frozen-q90 band (2026-09-19, merged into v12 same day): `submission_v13` was v12's FNO + v4-style table for the first `warmup_windows: 5` pairs, then run-wide freeze. Real-30: sps 61.05 vs online 60.53 — frozen won, so v12 now runs the frozen implementation and `submission_v13/` was removed (history kept here).
 - v12 FNO+q90 (2026-09-19): `submission_v12` = frozen FNO band (`base_model: fno`, online warmup then run-wide freeze; previously v4's per-step band, superseded). fp32 ckpt (~403 MB) exceeds the cap — smoke/pack with `sim_real_fno_fp16.pth`. Run via `notebook/eval_kaggle.ipynb` (`VARIANT='submission_v12'`, `MODEL_HINT='fno'`).
 - v11 test-time LoRA (2026-09-18): `submission_v11` wraps all 36 CNO Conv3ds with rank-4 adapters (`y = conv(x) + (α/r)·B(A(x))`, B zero-init), 329,616 trainable params (~4%), 1-step SGD on adapters only. Pure torch (no `peft`). Local CNO smoke: wraps/loads/adapts end-to-end. Notebook §5f pending.
-- v14 full MSE+TD update + TKE maps (2026-09-21): `submission_v14` takes `ttt_steps` (default 3) full-parameter gradient steps every `ttt_step` on `MSE + td_lambda*MSE(Δpred, Δtgt)` (Δ = 1-step temporal diff on u, v), no intervals (scorer default band, v9-style isolation). Companion `tke_maps.py` replays the stream and logs per-window `KE(x) = 1/2[Var_t(u)+Var_t(v)]` maps plus the `KE_TTA − KE_target` diff panels (`ke_win*.png`, `ke_mean_diff.png`, `ke_maps.npz`); scalar cross-check matches `scoring.py` exactly. Smoke (TinyForecaster fallback): bounds 4/4, final 68.8. Next: Kaggle real-30 GPU run.
+- v14 full MSE+TD update + TKE maps (2026-09-21): `submission_v14` takes full-parameter gradient steps every `ttt_step` on `MSE + td_lambda*MSE(Δpred, Δtgt)` (Δ = 1-step temporal diff on u, v), no intervals (scorer default band, v9-style isolation). Companion `tke_maps.py` replays the stream and logs per-window `KE(x) = 1/2[Var_t(u)+Var_t(v)]` maps plus the `KE_TTA − KE_target` diff panels (`ke_win*.png`, `ke_mean_diff.png`, `ke_maps.npz`); scalar cross-check matches `scoring.py` exactly. Smoke (TinyForecaster fallback): bounds 4/4, final 68.8. Real-30 Adam probe (`lr=0.005`, 1 step, `td_lambda=1`): final 75.82; see Staged.
 
 ## Local runs (`local_eval.py --data ./example_data`, synthetic, NOT leaderboard-comparable)
 
@@ -128,6 +128,21 @@ Per-channel tails: u `q95/|q05| = 1.130` (mild right skew), v `= 0.984`. No SPS 
 SPS components (270/270 steps with bounds): raw 0.449313, coverage 0.7473, mean_nil 0.2347 (exp(-nil) 0.7969; branches dm 0.519 / tke 0.285 / mvpe 0.521).
 
 Frozen beats online: the same FNO with v4's per-step band scored sps 60.53 at coverage 0.8180 / nil 0.374; freezing after 5 warmup windows drops coverage 7pts (0.747) but cuts width 37% (nil 0.235) — sharpness wins over coverage at these levels, net +0.52 sps. Step time also falls (25.4ms vs 30.6ms, no per-step quantile), final 83.16 vs 82.80 — best staged number. v12 now runs the frozen implementation (promoted from `submission_v13`, removed); the online-band numbers above are kept as history.
+
+### v14 FNO + 1-step Adam MSE+TD on real-30 (Kaggle GPU — 270 steps)
+
+Configuration: `sim_real_fno.pth`, `optimizer=adam`, `ttt_lr=0.005`,
+`ttt_steps=1`, `td_lambda=1`, no returned intervals (default band).
+
+| rel_l2 | tke | mvpe | time | sps | final | per-step |
+|---|---|---|---|---|---|---|
+| 91.982 | 70.182 | 90.989 | 73.971 | 51.972 | 75.819 | 90.26ms |
+
+Raw errors: rel-L2 0.174336, TKE 0.849752, MVPE 0.198067. SPS raw
+0.078920, coverage 0.1569, mean NIL 0.1533. Mean adaptation losses over
+240 steps: total 0.135412, MSE 0.111570, TD 0.023841. Adam at this learning
+rate substantially degrades all point metrics versus frozen v12 FNO and also
+adds runtime; this probe is not competitive.
 
 ### v5 relative-q90 on real-30 (2026-09-18, Kaggle GPU, notebook §5c — 270 steps)
 

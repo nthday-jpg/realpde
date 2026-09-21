@@ -1,0 +1,358 @@
+#!/usr/bin/env python3
+"""Train a configurable FNO3d with Hugging Face Accelerate.
+
+The companion ``notebook/train_fno_kaggle.ipynb`` owns the user-facing
+configuration and launches this script with ``accelerate launch``. All options
+can also be supplied as environment variables; see ``Config.from_env``.
+"""
+from __future__ import annotations
+
+import math
+import os
+import sys
+from dataclasses import asdict, dataclass
+from pathlib import Path
+
+import torch
+import torch.nn.functional as F
+from accelerate import Accelerator
+from torch.utils.data import DataLoader, Subset, TensorDataset
+from tqdm.auto import tqdm
+
+_REPO = Path(__file__).resolve().parents[1]
+for _path in (str(_REPO / "src"), str(_REPO)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+from realpde.datasets import (  # noqa: E402
+    PDEDataset,
+    PDENormalizer,
+    file_window_counts,
+    trajectory_split_indices,
+)
+from realpde.rpde_baselines.model.fno import FNO3d  # noqa: E402
+
+
+def _env(name: str, default: str) -> str:
+    return os.environ.get(name, default)
+
+
+def _bool_env(name: str, default: bool) -> bool:
+    value = _env(name, "1" if default else "0").strip().lower()
+    if value in {"1", "true", "yes", "on"}:
+        return True
+    if value in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean, got {value!r}")
+
+
+@dataclass
+class Config:
+    data_path: str
+    data_cache: str
+    save_dir: str
+    resume_ckpt: str
+    in_step: int
+    out_step: int
+    interval: int
+    sub_s: int
+    val_frac: float
+    seed: int
+    batch_size: int
+    num_workers: int
+    epochs: int
+    lr: float
+    weight_decay: float
+    grad_accum_steps: int
+    max_grad_norm: float
+    mixed_precision: str
+    modes1: int
+    modes2: int
+    modes3: int
+    n_layers: int
+    width: int
+    padding: int
+    save_every: int
+    save_optimizer: bool
+    wandb_project: str
+    wandb_run_name: str
+
+    @classmethod
+    def from_env(cls) -> "Config":
+        return cls(
+            data_path=_env("DATA_PATH", "data/train_sim"),
+            data_cache=_env("DATA_CACHE", ""),
+            save_dir=_env("SAVE_DIR", "/kaggle/working/fno_checkpoints"),
+            resume_ckpt=_env("RESUME_CKPT", ""),
+            in_step=int(_env("IN_STEP", "20")),
+            out_step=int(_env("OUT_STEP", "20")),
+            interval=int(_env("INTERVAL", "20")),
+            sub_s=int(_env("SUB_S", "2")),
+            val_frac=float(_env("VAL_FRAC", "0.1")),
+            seed=int(_env("SEED", "42")),
+            batch_size=int(_env("BATCH_SIZE", "1")),
+            num_workers=int(_env("NUM_WORKERS", "4")),
+            epochs=int(_env("EPOCHS", "50")),
+            lr=float(_env("LR", "1e-4")),
+            weight_decay=float(_env("WEIGHT_DECAY", "0")),
+            grad_accum_steps=int(_env("GRAD_ACCUM_STEPS", "1")),
+            max_grad_norm=float(_env("MAX_GRAD_NORM", "1.0")),
+            mixed_precision=_env("MIXED_PRECISION", "fp16" if torch.cuda.is_available() else "no"),
+            modes1=int(_env("FNO_MODES1", "4")),
+            modes2=int(_env("FNO_MODES2", "12")),
+            modes3=int(_env("FNO_MODES3", "16")),
+            n_layers=int(_env("FNO_N_LAYERS", "4")),
+            width=int(_env("FNO_WIDTH", "64")),
+            padding=int(_env("FNO_PADDING", "6")),
+            save_every=int(_env("SAVE_EVERY", "5")),
+            save_optimizer=_bool_env("SAVE_OPTIMIZER", True),
+            wandb_project=_env("WANDB_PROJECT", "realpde-fno"),
+            wandb_run_name=_env("WANDB_RUN_NAME", ""),
+        )
+
+
+def _load_data(cfg: Config, accelerator: Accelerator):
+    cache = Path(cfg.data_cache) if cfg.data_cache else None
+    if cache and cache.is_file():
+        blob = torch.load(cache, map_location="cpu", weights_only=False)
+        full = TensorDataset(blob["inputs"], blob["targets"])
+        counts = ([tuple(item) for item in blob["file_counts"]]
+                  if "file_counts" in blob else
+                  file_window_counts(cfg.data_path, cfg.in_step, cfg.out_step, cfg.interval))
+        accelerator.print(f"[Data] loaded {len(full)} windows from cache {cache}")
+    else:
+        blob = None
+        full = PDEDataset(
+            cfg.data_path,
+            in_step=cfg.in_step,
+            out_step=cfg.out_step,
+            interval=cfg.interval,
+            sub_s=cfg.sub_s,
+        )
+        counts = file_window_counts(cfg.data_path, cfg.in_step, cfg.out_step, cfg.interval)
+        accelerator.print(f"[Data] loaded {len(full)} windows from {cfg.data_path}")
+
+    if sum(n for _, n in counts) != len(full):
+        raise ValueError("Dataset window count mismatch; rebuild DATA_CACHE with the current window settings")
+    train_idx, val_idx = trajectory_split_indices(counts, cfg.val_frac, cfg.seed)
+    if not train_idx or not val_idx:
+        raise ValueError("The trajectory split produced an empty train or validation set")
+
+    if blob is not None:
+        train_norm = PDENormalizer.fit_from_samples(
+            blob["inputs"][train_idx], blob["targets"][train_idx])
+        val_norm = PDENormalizer.fit_from_samples(
+            blob["inputs"][val_idx], blob["targets"][val_idx])
+    else:
+        train_norm = PDENormalizer.fit_from_indexed(full, train_idx)
+        val_norm = PDENormalizer.fit_from_indexed(full, val_idx)
+
+    common = {
+        "num_workers": cfg.num_workers,
+        "pin_memory": torch.cuda.is_available(),
+        "persistent_workers": cfg.num_workers > 0,
+    }
+    train_loader = DataLoader(
+        Subset(full, train_idx), batch_size=cfg.batch_size, shuffle=True,
+        drop_last=False, **common)
+    val_loader = DataLoader(
+        Subset(full, val_idx), batch_size=cfg.batch_size, shuffle=False,
+        drop_last=False, **common)
+    accelerator.print(
+        f"[Split] {len(train_idx)} train / {len(val_idx)} val windows; "
+        f"train norm: {train_norm.describe()}")
+    return full, train_loader, val_loader, train_norm, val_norm
+
+
+def _state_dict_from_checkpoint(obj):
+    if isinstance(obj, dict) and "model_state_dict" in obj:
+        return obj["model_state_dict"]
+    if isinstance(obj, dict) and "state_fp16" in obj:
+        complex_keys = set(obj.get("complex_keys", []))
+        return {
+            key: (torch.view_as_complex(value.float()) if key in complex_keys
+                  else value.float() if torch.is_tensor(value) and value.dtype == torch.float16
+                  else value)
+            for key, value in obj["state_fp16"].items()
+        }
+    return obj
+
+
+def _build_model(cfg: Config, sample):
+    input_shape, output_shape = tuple(sample[0].shape), tuple(sample[1].shape)
+    if output_shape[0] % input_shape[0] != 0:
+        raise ValueError("FNO3d requires OUT_STEP to be an integer multiple of IN_STEP")
+    if input_shape[1:3] != output_shape[1:3]:
+        raise ValueError("FNO3d requires matching input/output spatial shapes")
+    padded = (input_shape[0] + cfg.padding,
+              input_shape[1] + cfg.padding,
+              input_shape[2] + cfg.padding)
+    limits = (padded[0], padded[1], padded[2] // 2 + 1)
+    modes = (cfg.modes1, cfg.modes2, cfg.modes3)
+    if any(mode <= 0 or mode > limit for mode, limit in zip(modes, limits)):
+        raise ValueError(f"FNO modes {modes} exceed padded FFT limits {limits}")
+
+    model = FNO3d(
+        modes1=cfg.modes1,
+        modes2=cfg.modes2,
+        modes3=cfg.modes3,
+        n_layers=cfg.n_layers,
+        width=cfg.width,
+        shape_in=input_shape,
+        shape_out=output_shape,
+    )
+    model.padding = cfg.padding
+    return model
+
+
+def _checkpoint(cfg, accelerator, model, optimizer, scheduler, epoch, global_step,
+                train_loss, val_loss, train_norm, val_norm):
+    state = {
+        "model_state_dict": {
+            key: value.detach().cpu()
+            for key, value in accelerator.get_state_dict(model).items()
+        },
+        "epoch": epoch,
+        "global_step": global_step,
+        "train_loss": train_loss,
+        "val_loss": val_loss,
+        "cfg": asdict(cfg),
+        "norm_train": train_norm.as_tuple(),
+        "norm_val": val_norm.as_tuple(),
+    }
+    if cfg.save_optimizer:
+        state["optimizer_state_dict"] = optimizer.state_dict()
+        state["scheduler_state_dict"] = scheduler.state_dict()
+    return state
+
+
+def main() -> None:
+    cfg = Config.from_env()
+    accelerator = Accelerator(
+        mixed_precision=cfg.mixed_precision,
+        gradient_accumulation_steps=cfg.grad_accum_steps,
+        log_with="wandb" if cfg.wandb_project else None,
+    )
+    torch.manual_seed(cfg.seed)
+
+    full, train_loader, val_loader, train_norm, val_norm = _load_data(cfg, accelerator)
+    model = _build_model(cfg, full[0])
+    accelerator.print(
+        f"[Model] FNO3d modes=({cfg.modes1},{cfg.modes2},{cfg.modes3}) "
+        f"layers={cfg.n_layers} width={cfg.width} padding={cfg.padding}; "
+        f"{sum(p.numel() for p in model.parameters()):,} parameter elements")
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    start_epoch, global_step, best_val = 0, 0, math.inf
+    resume_obj = None
+    if cfg.resume_ckpt:
+        resume_obj = torch.load(cfg.resume_ckpt, map_location="cpu", weights_only=False)
+        model.load_state_dict(_state_dict_from_checkpoint(resume_obj), strict=True)
+        if isinstance(resume_obj, dict):
+            start_epoch = int(resume_obj.get("epoch", -1)) + 1
+            global_step = int(resume_obj.get("global_step", 0))
+            best_val = float(resume_obj.get("val_loss", math.inf))
+        accelerator.print(f"[Resume] model loaded from {cfg.resume_ckpt}")
+
+    updates_per_epoch = math.ceil(len(train_loader) / cfg.grad_accum_steps)
+    total_updates = max(cfg.epochs * updates_per_epoch, 1)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer, T_max=total_updates, eta_min=cfg.lr * 0.01)
+    if isinstance(resume_obj, dict) and "optimizer_state_dict" in resume_obj:
+        optimizer.load_state_dict(resume_obj["optimizer_state_dict"])
+        if "scheduler_state_dict" in resume_obj:
+            scheduler.load_state_dict(resume_obj["scheduler_state_dict"])
+        accelerator.print(f"[Resume] optimizer restored; starting at epoch {start_epoch}")
+
+    model, optimizer, train_loader, val_loader, scheduler = accelerator.prepare(
+        model, optimizer, train_loader, val_loader, scheduler)
+
+    save_dir = Path(cfg.save_dir)
+    if accelerator.is_main_process:
+        save_dir.mkdir(parents=True, exist_ok=True)
+        train_norm.save(save_dir / "mean_std_train.pt")
+        val_norm.save(save_dir / "mean_std_val.pt")
+        if cfg.wandb_project:
+            accelerator.init_trackers(
+                cfg.wandb_project,
+                config=asdict(cfg),
+                init_kwargs={"wandb": {"name": cfg.wandb_run_name}}
+                if cfg.wandb_run_name else None,
+            )
+    accelerator.wait_for_everyone()
+
+    for epoch in range(start_epoch, start_epoch + cfg.epochs):
+        model.train()
+        train_loss_sum = torch.zeros((), device=accelerator.device)
+        train_elements = torch.zeros((), device=accelerator.device)
+        progress = tqdm(train_loader, disable=not accelerator.is_local_main_process,
+                        desc=f"Epoch {epoch:03d}", leave=False)
+        optimizer.zero_grad(set_to_none=True)
+        for inputs, targets in progress:
+            inputs, targets = train_norm.preprocess(inputs, targets)
+            with accelerator.accumulate(model):
+                predictions = model(inputs)
+                loss = F.mse_loss(predictions, targets)
+                accelerator.backward(loss)
+                if accelerator.sync_gradients and cfg.max_grad_norm > 0:
+                    accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
+                optimizer.step()
+                if accelerator.sync_gradients:
+                    scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+            train_loss_sum += loss.detach() * targets.numel()
+            train_elements += targets.numel()
+            if accelerator.sync_gradients:
+                global_step += 1
+            progress.set_postfix(loss=f"{loss.item():.6f}")
+
+        train_totals = torch.stack((train_loss_sum, train_elements))
+        train_totals = accelerator.reduce(train_totals, reduction="sum")
+        train_loss = (train_totals[0] / train_totals[1].clamp_min(1)).item()
+
+        model.eval()
+        val_loss_sum = torch.zeros((), device=accelerator.device)
+        val_elements = torch.zeros((), device=accelerator.device)
+        with torch.no_grad():
+            for inputs, targets in val_loader:
+                inputs, targets = val_norm.preprocess(inputs, targets)
+                predictions = model(inputs)
+                val_loss_sum += F.mse_loss(predictions, targets, reduction="sum")
+                val_elements += targets.numel()
+        val_totals = accelerator.reduce(
+            torch.stack((val_loss_sum, val_elements)), reduction="sum")
+        val_loss = (val_totals[0] / val_totals[1].clamp_min(1)).item()
+
+        metrics = {
+            "epoch": epoch,
+            "train_loss": train_loss,
+            "val_loss": val_loss,
+            "lr": scheduler.get_last_lr()[0],
+        }
+        if cfg.wandb_project:
+            accelerator.log(metrics, step=global_step)
+        accelerator.print(
+            f"Epoch {epoch:03d} | train {train_loss:.6f} | val {val_loss:.6f} "
+            f"| lr {metrics['lr']:.3e}" + (" <-- best" if val_loss < best_val else ""))
+
+        accelerator.wait_for_everyone()
+        if accelerator.is_main_process:
+            state = _checkpoint(
+                cfg, accelerator, model, optimizer, scheduler, epoch, global_step,
+                train_loss, val_loss, train_norm, val_norm)
+            accelerator.save(state, save_dir / "last.pth")
+            if val_loss < best_val:
+                best_val = val_loss
+                accelerator.save(state, save_dir / "best.pth")
+            if cfg.save_every > 0 and (epoch + 1) % cfg.save_every == 0:
+                accelerator.save(state, save_dir / f"epoch_{epoch:03d}.pth")
+        accelerator.wait_for_everyone()
+
+    accelerator.print(f"Done. Best validation MSE: {best_val:.6f}; outputs: {save_dir}")
+    if cfg.wandb_project:
+        accelerator.end_training()
+
+
+if __name__ == "__main__":
+    main()
