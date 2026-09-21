@@ -10,6 +10,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+import types
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -31,7 +32,7 @@ from realpde.datasets import (  # noqa: E402
     file_window_counts,
     trajectory_split_indices,
 )
-from realpde.rpde_baselines.model.fno import FNO3d  # noqa: E402
+from realpde.rpde_baselines.model.fno import FNO3d, SpectralConv3d  # noqa: E402
 
 
 def _env(name: str, default: str) -> str:
@@ -191,6 +192,33 @@ def _state_dict_from_checkpoint(obj):
     return obj
 
 
+def _amp_safe_spectral_forward(self, x):
+    """Training-only FP32 spectral path without modifying committee code.
+
+    CUDA half-precision FFT requires power-of-two dimensions, while baseline
+    padding produces (26, 38, 70). Pointwise layers remain under AMP; only FFT
+    and complex multiplication run in fp32/complex64. State-dict keys and the
+    baseline architecture are unchanged.
+    """
+    with torch.autocast(device_type=x.device.type, enabled=False):
+        x = x.float()
+        batchsize = x.shape[0]
+        x_ft = torch.fft.rfftn(x, dim=[-3, -2, -1])
+        out_ft = torch.zeros(
+            batchsize, self.out_channels, x.size(-3), x.size(-2),
+            x.size(-1) // 2 + 1, dtype=torch.cfloat, device=x.device)
+        out_ft[:, :, :self.modes1, :self.modes2, :self.modes3] = self.compl_mul3d(
+            x_ft[:, :, :self.modes1, :self.modes2, :self.modes3], self.weights1)
+        out_ft[:, :, -self.modes1:, :self.modes2, :self.modes3] = self.compl_mul3d(
+            x_ft[:, :, -self.modes1:, :self.modes2, :self.modes3], self.weights2)
+        out_ft[:, :, :self.modes1, -self.modes2:, :self.modes3] = self.compl_mul3d(
+            x_ft[:, :, :self.modes1, -self.modes2:, :self.modes3], self.weights3)
+        out_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3] = self.compl_mul3d(
+            x_ft[:, :, -self.modes1:, -self.modes2:, :self.modes3], self.weights4)
+        return torch.fft.irfftn(
+            out_ft, s=(x.size(-3), x.size(-2), x.size(-1)))
+
+
 def _build_model(cfg: Config, sample):
     input_shape, output_shape = tuple(sample[0].shape), tuple(sample[1].shape)
     if output_shape[0] % input_shape[0] != 0:
@@ -215,6 +243,10 @@ def _build_model(cfg: Config, sample):
         shape_out=output_shape,
     )
     model.padding = cfg.padding
+    if cfg.mixed_precision != "no":
+        for module in model.modules():
+            if isinstance(module, SpectralConv3d):
+                module.forward = types.MethodType(_amp_safe_spectral_forward, module)
     return model
 
 
@@ -332,6 +364,14 @@ def main() -> None:
         gradient_accumulation_steps=cfg.grad_accum_steps,
         log_with="wandb" if cfg.wandb_project else None,
     )
+    if accelerator.mixed_precision != cfg.mixed_precision:
+        raise RuntimeError(
+            f"Precision mismatch: config requested {cfg.mixed_precision!r}, "
+            f"but Accelerate activated {accelerator.mixed_precision!r}"
+        )
+    accelerator.print(
+        f"[Precision] requested={cfg.mixed_precision} "
+        f"active={accelerator.mixed_precision}")
     torch.manual_seed(cfg.seed)
 
     full, train_loader, val_loader, train_norm, val_norm = _load_data(cfg, accelerator)
