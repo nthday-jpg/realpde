@@ -7,8 +7,9 @@
   where `Δ` is the 1-step temporal difference on (u, v). MSE anchors the
   level, TD anchors the dynamics so adaptation cannot trade temporal
   variability for instantaneous error — the failure mode the TKE scalar hides.
-- **Calibration:** v4/v10 online per-channel `q90` band on every step
-  (`return_bounds: true`; set false for a point-only ablation).
+- **Intervals:** none returned — the scorer grades the default `±5%` band
+  (same setup as v9, isolating what the MSE + TD update adds over plain
+  1-step SGD).
 - **TKE spatial logging:** `tke_maps.py` replays the streaming loop and logs
   the spatial distribution `KE(x) = 1/2[Var_t(u) + Var_t(v)]` per window, with
   the revealing panel `KE_TTA − KE_target` (not just the scalar TKE error).

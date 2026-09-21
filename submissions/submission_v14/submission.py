@@ -14,15 +14,14 @@ the TKE scalar hides).
 
 Only revealed data is used (cached previous input vs revealed previous
 target); the current target is never touched. After adapting, the current
-input is predicted with no gradients, and a v4/v10-style online per-channel
-residual-quantile band is returned on EVERY step so SPS stays calibrated
-(``return_bounds: true``; set false for a pure point-prediction ablation).
+input is predicted with no gradients. No uncertainty intervals are returned,
+so the scorer grades the default ``pred ± 0.05*|pred|`` band (same setup as
+v9, isolating what the MSE + TD update adds over plain 1-step SGD).
 
 Knobs in ``policy.yaml``: ``base_model`` (default ``cno``), ``ttt_lr``
 (default 1e-3), ``ttt_steps`` (inner gradient steps, default 3),
 ``optimizer`` (``sgd``|``adam``, default ``sgd``), ``td_lambda`` (default 0.1),
-``grad_clip`` (global norm clip, default 1.0, 0 disables), ``coverage``,
-``history``, ``table_frames``, ``fallback_frac``, ``return_bounds``.
+``grad_clip`` (global norm clip, default 1.0, 0 disables).
 
 ``info`` carries ``adapt_loss`` (final total loss, read by the evaluator)
 plus ``mse_loss`` / ``td_loss`` components for logging (ignored by evaluator).
@@ -36,7 +35,6 @@ from __future__ import annotations
 
 import copy
 import os
-from collections import deque
 from typing import Any, Dict, Optional, Tuple
 
 import torch
@@ -48,7 +46,7 @@ except Exception:  # pragma: no cover
     TTTModel = nn.Module  # type: ignore
 
 IN_STEP = 20
-CHANNELS = 3  # [u, v, p]; TD + calibration cover measured u, v only
+CHANNELS = 3  # [u, v, p]; TD covers measured u, v only
 MEASURED = 2
 
 
@@ -68,7 +66,7 @@ class TinyForecaster(nn.Module):
 
 
 def _read_policy(submission_dir: str) -> Dict[str, Any]:
-    """Flat policy reader for adaptation + TD + calibration knobs."""
+    """Flat policy reader for adaptation + TD knobs."""
     policy: Dict[str, Any] = {
         "base_model": "cno",
         "ttt_lr": 1e-3,
@@ -76,11 +74,6 @@ def _read_policy(submission_dir: str) -> Dict[str, Any]:
         "optimizer": "sgd",
         "td_lambda": 0.1,
         "grad_clip": 1.0,
-        "coverage": 0.90,
-        "history": 2,
-        "table_frames": 5,
-        "fallback_frac": 0.05,
-        "return_bounds": True,
     }
     path = os.path.join(submission_dir, "policy.yaml")
     if os.path.exists(path):
@@ -102,24 +95,12 @@ def _read_policy(submission_dir: str) -> Dict[str, Any]:
                     policy[k] = float(v)
                 elif k == "grad_clip":
                     policy[k] = float(v)
-                elif k == "coverage":
-                    policy[k] = float(v)
-                elif k == "history":
-                    policy[k] = max(int(v), 1)
-                elif k == "table_frames":
-                    policy[k] = max(int(v), 1)
-                elif k == "fallback_frac":
-                    policy[k] = float(v)
-                elif k == "return_bounds":
-                    policy[k] = v.lower() not in ("0", "false", "no", "off")
     if not policy["ttt_lr"] > 0.0:
         raise ValueError(f"ttt_lr must be positive, got {policy['ttt_lr']}")
     if policy["optimizer"] not in ("sgd", "adam"):
         raise ValueError(f"optimizer must be sgd|adam, got {policy['optimizer']}")
     if not policy["td_lambda"] >= 0.0:
         raise ValueError(f"td_lambda must be >= 0, got {policy['td_lambda']}")
-    if not (0.0 < policy["coverage"] < 1.0):
-        raise ValueError(f"coverage must be in (0, 1), got {policy['coverage']}")
     return policy
 
 
@@ -145,11 +126,6 @@ class FullGradMsTdTTTModel(TTTModel):
         optimizer: str = "sgd",
         td_lambda: float = 0.1,
         grad_clip: float = 1.0,
-        coverage: float = 0.90,
-        history: int = 2,
-        table_frames: int = 5,
-        fallback_frac: float = 0.05,
-        return_bounds: bool = True,
     ):
         super().__init__()
         self.base = base.to(device)
@@ -159,16 +135,9 @@ class FullGradMsTdTTTModel(TTTModel):
         self.optimizer_name = optimizer
         self.td_lambda = td_lambda
         self.grad_clip = grad_clip
-        self.coverage = coverage
-        self.history = history
-        self.table_frames = table_frames
-        self.fallback_frac = fallback_frac
-        self.return_bounds = return_bounds
         self._init_state = copy.deepcopy(self.base.state_dict())
         self._opt = self._make_opt()
         self._prev_input: Optional[torch.Tensor] = None
-        self._resid: deque[torch.Tensor] = deque()
-        self._prev_pred: Optional[torch.Tensor] = None
 
     def _make_opt(self) -> torch.optim.Optimizer:
         if self.optimizer_name == "adam":
@@ -179,19 +148,6 @@ class FullGradMsTdTTTModel(TTTModel):
         self.base.load_state_dict(copy.deepcopy(self._init_state))
         self._opt = self._make_opt()
         self._prev_input = None
-        self._resid.clear()
-        self._prev_pred = None
-
-    def _update_table(self, prev_target_norm: torch.Tensor) -> Optional[torch.Tensor]:
-        """Fold the revealed previous pair into the residual table."""
-        if self._prev_pred is None:
-            return None
-        resid = (prev_target_norm - self._prev_pred).abs()[..., :self.table_frames, :, :, :MEASURED]
-        self._resid.append(resid.detach().reshape(-1, MEASURED).cpu())
-        while len(self._resid) > self.history:
-            self._resid.popleft()
-        pooled = torch.cat(list(self._resid), dim=0)
-        return torch.quantile(pooled, self.coverage, dim=0)
 
     def ttt_step(
         self,
@@ -205,10 +161,8 @@ class FullGradMsTdTTTModel(TTTModel):
         adapt_loss: Optional[float] = None
         mse_f: Optional[float] = None
         td_f: Optional[float] = None
-        half_width: Optional[torch.Tensor] = None
         if prev_target_norm is not None and self._prev_input is not None:
             prev_target_norm = torch.as_tensor(prev_target_norm).to(self.device)
-            half_width = self._update_table(prev_target_norm)
             self.base.train()
             for _ in range(self.ttt_steps):
                 self._opt.zero_grad()
@@ -229,31 +183,14 @@ class FullGradMsTdTTTModel(TTTModel):
         with torch.no_grad():
             pred_norm = self.base(input_norm)
 
-        # (3) Band around the current prediction on EVERY step (or point-only).
-        info: Dict[str, Any] = {
+        # (3) Cache the current input for the next step's adaptation.
+        self._prev_input = input_norm.detach()
+
+        return pred_norm, {
             "adapt_loss": adapt_loss,
             "mse_loss": mse_f,
             "td_loss": td_f,
         }
-        if self.return_bounds:
-            f = self.fallback_frac
-            if half_width is not None:
-                w_uv = half_width.to(self.device).view(1, 1, 1, 1, MEASURED)
-            else:
-                w_uv = f * pred_norm[..., :MEASURED].abs()
-            w_p = f * pred_norm[..., MEASURED:].abs()
-            info["lower"] = torch.cat(
-                [pred_norm[..., :MEASURED] - w_uv, pred_norm[..., MEASURED:] - w_p], dim=-1
-            )
-            info["upper"] = torch.cat(
-                [pred_norm[..., :MEASURED] + w_uv, pred_norm[..., MEASURED:] + w_p], dim=-1
-            )
-
-        # (4) Cache the current input AND prediction for the next step.
-        self._prev_input = input_norm.detach()
-        self._prev_pred = pred_norm.detach()
-
-        return pred_norm, info
 
 
 def _build_base(submission_dir: str, device: str, policy: Dict[str, Any]) -> nn.Module:
@@ -282,9 +219,4 @@ def get_ttt_model(submission_dir: str, device: str):
         policy["optimizer"],
         policy["td_lambda"],
         policy["grad_clip"],
-        policy["coverage"],
-        policy["history"],
-        policy["table_frames"],
-        policy["fallback_frac"],
-        policy["return_bounds"],
     )
