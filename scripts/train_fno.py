@@ -76,6 +76,7 @@ class Config:
     padding: int
     save_every: int
     save_optimizer: bool
+    log_every_steps: int
     wandb_project: str
     wandb_run_name: str
 
@@ -108,6 +109,7 @@ class Config:
             padding=int(_env("FNO_PADDING", "6")),
             save_every=int(_env("SAVE_EVERY", "5")),
             save_optimizer=_bool_env("SAVE_OPTIMIZER", True),
+            log_every_steps=int(_env("LOG_EVERY_STEPS", "10")),
             wandb_project=_env("WANDB_PROJECT", "realpde-pretrain"),
             wandb_run_name=_env("WANDB_RUN_NAME", ""),
         )
@@ -449,6 +451,18 @@ def main() -> None:
             train_elements += targets.numel()
             if accelerator.sync_gradients:
                 global_step += 1
+                if (cfg.wandb_project and cfg.log_every_steps > 0
+                        and global_step % cfg.log_every_steps == 0):
+                    batch_loss = accelerator.reduce(loss.detach(), reduction="mean")
+                    if accelerator.is_main_process:
+                        accelerator.log(
+                            {
+                                "train_batch_loss": batch_loss.item(),
+                                "train_lr": scheduler.get_last_lr()[0],
+                                "train_epoch": epoch,
+                            },
+                            step=global_step,
+                        )
             progress.set_postfix(
                 loss=f"{loss.item():.6f}",
                 lr=f"{scheduler.get_last_lr()[0]:.2e}",
