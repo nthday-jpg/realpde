@@ -48,6 +48,55 @@ def _bool_env(name: str) -> bool:
     raise ValueError(f"{name} must be a boolean, got {value!r}")
 
 
+def binned_spectral_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    eps: float = 1e-6,
+    n_bins: int = 32,
+) -> torch.Tensor:
+    """Compare radially binned spatial power spectra.
+
+    The final two dimensions are interpreted as height and width; all leading
+    dimensions (batch, time, and channels) are averaged in the returned loss.
+    FFTs run in float32 so this loss is safe when mixed precision is enabled.
+    """
+    if pred.shape != target.shape:
+        raise ValueError(f"pred/target shapes differ: {pred.shape} != {target.shape}")
+    if pred.ndim < 2:
+        raise ValueError("pred and target must have at least two dimensions")
+    if n_bins <= 0:
+        raise ValueError("n_bins must be positive")
+
+    pred_fft = torch.fft.rfftn(pred.float(), dim=(-2, -1))
+    targ_fft = torch.fft.rfftn(target.float(), dim=(-2, -1))
+    pred_power = pred_fft.abs().square()
+    targ_power = targ_fft.abs().square()
+
+    height = pred_power.shape[-2]
+    ky = torch.fft.fftfreq(height, device=pred.device)
+    kx = torch.fft.rfftfreq(pred.shape[-1], device=pred.device)
+    ky, kx = torch.meshgrid(ky, kx, indexing="ij")
+    radius = torch.sqrt(kx.square() + ky.square())
+    radius = radius / radius.max().clamp_min(1e-12)
+
+    edges = torch.linspace(0, 1, n_bins + 1, device=pred.device)
+    losses = []
+    for bin_idx, (lo, hi) in enumerate(zip(edges[:-1], edges[1:])):
+        # Include the maximum-radius modes in the final band.
+        mask = ((radius >= lo) &
+                ((radius <= hi) if bin_idx == n_bins - 1 else (radius < hi)))
+        if not mask.any():
+            continue
+        pred_band = pred_power[..., mask].mean(dim=-1)
+        targ_band = targ_power[..., mask].mean(dim=-1)
+        relative_error = 1.0 - (pred_band + eps) / (targ_band + eps)
+        losses.append(relative_error.square())
+
+    if not losses:
+        raise ValueError("no Fourier modes fell into the requested spectral bins")
+    return torch.stack(losses, dim=-1).mean()
+
+
 @dataclass
 class Config:
     data_path: str
@@ -65,6 +114,8 @@ class Config:
     epochs: int
     lr: float
     weight_decay: float
+    spectral_loss_weight: float
+    spectral_loss_bins: int
     grad_accum_steps: int
     max_grad_norm: float
     mixed_precision: str
@@ -97,6 +148,8 @@ class Config:
             epochs=int(_env("EPOCHS")),
             lr=float(_env("LR")),
             weight_decay=float(_env("WEIGHT_DECAY")),
+            spectral_loss_weight=float(os.environ.get("SPECTRAL_LOSS_WEIGHT", "0.05")),
+            spectral_loss_bins=int(os.environ.get("SPECTRAL_LOSS_BINS", "32")),
             grad_accum_steps=int(_env("GRAD_ACCUM_STEPS")),
             max_grad_norm=float(_env("MAX_GRAD_NORM")),
             mixed_precision=_env("MIXED_PRECISION"),
@@ -440,7 +493,15 @@ def main() -> None:
             inputs, targets = train_norm.preprocess(inputs, targets)
             with accelerator.accumulate(model):
                 predictions = model(inputs)
-                loss = F.mse_loss(predictions, targets)
+                mse = F.mse_loss(predictions, targets)
+                # Model tensors are (B, T, H, W, C); move channels before the
+                # spatial axes expected by binned_spectral_loss.
+                spectral = binned_spectral_loss(
+                    predictions.movedim(-1, -3),
+                    targets.movedim(-1, -3),
+                    n_bins=cfg.spectral_loss_bins,
+                )
+                loss = mse + cfg.spectral_loss_weight * spectral
                 accelerator.backward(loss)
                 if accelerator.sync_gradients and cfg.max_grad_norm > 0:
                     accelerator.clip_grad_norm_(model.parameters(), cfg.max_grad_norm)
@@ -454,11 +515,16 @@ def main() -> None:
                 global_step += 1
                 if (cfg.wandb_project and cfg.log_every_steps > 0
                         and global_step % cfg.log_every_steps == 0):
-                    batch_loss = accelerator.reduce(loss.detach(), reduction="mean")
+                    batch_metrics = accelerator.reduce(
+                        torch.stack((loss.detach(), mse.detach(), spectral.detach())),
+                        reduction="mean",
+                    )
                     if accelerator.is_main_process:
                         accelerator.log(
                             {
-                                "train_loss": batch_loss.item(),
+                                "train_loss": batch_metrics[0].item(),
+                                "train_mse": batch_metrics[1].item(),
+                                "train_spectral_loss": batch_metrics[2].item(),
                                 "epoch": epoch,
                                 "lr": scheduler.get_last_lr()[0],
                             },
@@ -466,6 +532,8 @@ def main() -> None:
                         )
             progress.set_postfix(
                 loss=f"{loss.item():.6f}",
+                mse=f"{mse.item():.6f}",
+                spectral=f"{spectral.item():.4f}",
                 lr=f"{scheduler.get_last_lr()[0]:.2e}",
             )
 
