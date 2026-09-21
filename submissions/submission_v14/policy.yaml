@@ -6,11 +6,11 @@ base_model: fno
 # Full-parameter optimizer learning rate (every ttt_step with a revealed pair).
 ttt_lr: 0.001
 # Inner gradient steps per ttt_step ("full update" vs v9/v10's single step).
-ttt_steps: 3
+ttt_steps: 1
 # Optimizer on all weights: sgd | adam.
 optimizer: sgd
 # Weight of the temporal-difference matching term:
 # loss = MSE(pred, tgt) + td_lambda * MSE(diff(pred), diff(tgt)).
-td_lambda: 0.1
+td_lambda: 0.3
 # Global grad-norm clip (0 disables).
 grad_clip: 0
