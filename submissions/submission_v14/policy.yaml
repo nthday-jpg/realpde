@@ -1,0 +1,27 @@
+# v14 knobs: full-gradient MSE + temporal-difference adaptation + calibration.
+# Resolution for base_model: this file > BASE_MODEL env > default "cno".
+# Needed because the staged checkpoint is renamed to model.pth,
+# which carries no architecture hint for load_baseline.
+base_model: cno
+# Full-parameter optimizer learning rate (every ttt_step with a revealed pair).
+ttt_lr: 0.001
+# Inner gradient steps per ttt_step ("full update" vs v9/v10's single step).
+ttt_steps: 3
+# Optimizer on all weights: sgd | adam.
+optimizer: sgd
+# Weight of the temporal-difference matching term:
+# loss = MSE(pred, tgt) + td_lambda * MSE(diff(pred), diff(tgt)).
+td_lambda: 0.1
+# Global grad-norm clip (0 disables).
+grad_clip: 1.0
+# Residual quantile level: nominal per-step coverage of the interval table.
+coverage: 0.90
+# Previous (pred, target) windows kept in the residual table.
+history: 2
+# First T time-frames of each window kept in the table (T=20, default 5).
+table_frames: 5
+# Relative half-width when the table is empty (trajectory start)
+# so bounds are returned on every step. 0.05 mirrors the scorer's default band.
+fallback_frac: 0.05
+# Return v4-style q90 bounds every step (false = point-prediction ablation).
+return_bounds: true

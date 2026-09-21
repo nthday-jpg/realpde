@@ -25,6 +25,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 | `submission_v10` | CNO via `load_baseline` | 1-step SGD + v4 q90 band every step | smoke OK (bounds 4/4) | ~30MB (with ckpt) | real-30 full row: final 74.71 (see Staged) |
 | `submission_v11` | CNO via `load_baseline` | 1-step SGD on LoRA adapters only (rank 4) | smoke OK (36 Conv3d, 329k LoRA params) | ~30MB (with ckpt) | pending Kaggle run |
 | `submission_v12` | FNO via `load_baseline` | none + frozen q90 band (online warmup, then reuse) | rel-L2 82.4, sps 51.5 (warmup path, 4/4 steps), final 61.8 | ~201MB (fp16 ckpt) | evaluated (smoke); real-30 final 83.16, sps 61.05 (see Staged) |
+| `submission_v14` | CNO via `load_baseline` | full update (3×SGD, all weights, MSE + TD reg) + v4 q90 band | smoke OK (bounds 4/4, final 68.8 fallback) | ~30MB (with ckpt) | pending Kaggle run |
 
 ## Changelog
 
@@ -40,6 +41,7 @@ its root. `model.pth` is never committed (see `.gitignore`).
 - v13 frozen-q90 band (2026-09-19, merged into v12 same day): `submission_v13` was v12's FNO + v4-style table for the first `warmup_windows: 5` pairs, then run-wide freeze. Real-30: sps 61.05 vs online 60.53 — frozen won, so v12 now runs the frozen implementation and `submission_v13/` was removed (history kept here).
 - v12 FNO+q90 (2026-09-19): `submission_v12` = frozen FNO band (`base_model: fno`, online warmup then run-wide freeze; previously v4's per-step band, superseded). fp32 ckpt (~403 MB) exceeds the cap — smoke/pack with `sim_real_fno_fp16.pth`. Run via `notebook/eval_kaggle.ipynb` (`VARIANT='submission_v12'`, `MODEL_HINT='fno'`).
 - v11 test-time LoRA (2026-09-18): `submission_v11` wraps all 36 CNO Conv3ds with rank-4 adapters (`y = conv(x) + (α/r)·B(A(x))`, B zero-init), 329,616 trainable params (~4%), 1-step SGD on adapters only. Pure torch (no `peft`). Local CNO smoke: wraps/loads/adapts end-to-end. Notebook §5f pending.
+- v14 full MSE+TD update + TKE maps (2026-09-21): `submission_v14` takes `ttt_steps` (default 3) full-parameter gradient steps every `ttt_step` on `MSE + td_lambda*MSE(Δpred, Δtgt)` (Δ = 1-step temporal diff on u, v) + v10-style q90 band. Companion `tke_maps.py` replays the stream and logs per-window `KE(x) = 1/2[Var_t(u)+Var_t(v)]` maps plus the `KE_TTA − KE_target` diff panels (`ke_win*.png`, `ke_mean_diff.png`, `ke_maps.npz`); scalar cross-check matches `scoring.py` exactly. Smoke (TinyForecaster fallback): bounds 4/4, final 68.8. Next: Kaggle real-30 GPU run.
 
 ## Local runs (`local_eval.py --data ./example_data`, synthetic, NOT leaderboard-comparable)
 
