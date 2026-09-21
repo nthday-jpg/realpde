@@ -89,7 +89,11 @@ def binned_spectral_loss(
             continue
         pred_band = pred_power[..., mask].mean(dim=-1)
         targ_band = targ_power[..., mask].mean(dim=-1)
-        relative_error = 1.0 - (pred_band + eps) / (targ_band + eps)
+        # A target-only denominator explodes in near-zero-energy bands. The
+        # symmetric relative difference is bounded to [-1, 1] because both
+        # powers are non-negative, keeping this regularizer numerically stable.
+        relative_error = ((pred_band - targ_band) /
+                          (pred_band + targ_band + eps))
         losses.append(relative_error.square())
 
     if not losses:
