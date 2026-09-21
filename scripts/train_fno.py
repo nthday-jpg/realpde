@@ -419,7 +419,7 @@ def main() -> None:
                 cfg.wandb_project,
                 config=asdict(cfg),
                 init_kwargs={"wandb": {"name": cfg.wandb_run_name}}
-                if cfg.wandb_run_name else None,
+                if cfg.wandb_run_name else {},
             )
     accelerator.wait_for_everyone()
 
@@ -457,9 +457,9 @@ def main() -> None:
                     if accelerator.is_main_process:
                         accelerator.log(
                             {
-                                "train_batch_loss": batch_loss.item(),
-                                "train_lr": scheduler.get_last_lr()[0],
-                                "train_epoch": epoch,
+                                "train_loss": batch_loss.item(),
+                                "epoch": epoch,
+                                "lr": scheduler.get_last_lr()[0],
                             },
                             step=global_step,
                         )
@@ -498,10 +498,13 @@ def main() -> None:
                 batch_scores = _scoring_metric_totals(
                     predictions_raw, targets_raw, sub_s_real=cfg.sub_s)
                 score_totals += batch_scores
-                batch_rel_l2 = (batch_scores[2] / batch_scores[5].clamp_min(1)).item()
+                batch_count = batch_scores[5].clamp_min(1)
+                batch_rel_l2 = (batch_scores[2] / batch_count).item()
+                batch_tke = (batch_scores[3] / batch_count).item()
                 val_progress.set_postfix(
                     loss=f"{(batch_val_sum / targets.numel()).item():.6f}",
-                    rel_l2=f"{batch_rel_l2:.4f}",
+                    rel_l2_score=f"{_error_score(batch_rel_l2):.2f}",
+                    tke_score=f"{_error_score(batch_tke):.2f}",
                 )
         val_totals = accelerator.reduce(
             torch.stack((val_loss_sum, val_elements)), reduction="sum")
@@ -523,7 +526,7 @@ def main() -> None:
 
         metrics = {
             "epoch": epoch,
-            "train_loss": train_loss,
+            "train_loss_epoch": train_loss,
             "val_loss": val_loss,
             "val_raw_mse": val_raw_mse,
             "val_rel_l2": val_rel_l2,
@@ -538,14 +541,22 @@ def main() -> None:
             "val_quality_score": (rel_l2_score + tke_score + mvpe_score + sps_score) / 4.0,
             "lr": scheduler.get_last_lr()[0],
         }
-        if cfg.wandb_project:
+        if cfg.wandb_project and accelerator.is_main_process:
             accelerator.log(metrics, step=global_step)
+
+        best_marker = "  <-- best" if val_loss < best_val else ""
         accelerator.print(
-            f"Epoch {epoch:03d} | train {train_loss:.6f} | val {val_loss:.6f} "
-            f"| raw MSE {val_raw_mse:.6f} | rel-L2 {val_rel_l2:.4f} "
-            f"| TKE {val_tke:.4f} | MVPE {val_mvpe:.4f} "
-            f"| SPS {val_sps:.4f} | quality {metrics['val_quality_score']:.2f} "
-            f"| lr {metrics['lr']:.3e}" + (" <-- best" if val_loss < best_val else ""))
+            f"\nEpoch {epoch:03d}{best_marker}\n"
+            f"  Losses : train={train_loss:.6f}  val={val_loss:.6f}  "
+            f"raw_mse={val_raw_mse:.6f}\n"
+            f"  Scores : quality={metrics['val_quality_score']:.2f}  "
+            f"rel_l2={rel_l2_score:.2f}  tke={tke_score:.2f}  "
+            f"mvpe={mvpe_score:.2f}  sps={sps_score:.2f}\n"
+            f"  Errors : rel_l2={val_rel_l2:.4f}  tke={val_tke:.4f}  "
+            f"mvpe={val_mvpe:.4f}  sps_raw={val_sps:.4f}  "
+            f"coverage={val_coverage:.4f}\n"
+            f"  Train  : step={global_step}  lr={metrics['lr']:.3e}"
+        )
 
         accelerator.wait_for_everyone()
         if accelerator.is_main_process:
@@ -561,7 +572,7 @@ def main() -> None:
         accelerator.wait_for_everyone()
 
     accelerator.print(f"Done. Best validation MSE: {best_val:.6f}; outputs: {save_dir}")
-    if cfg.wandb_project:
+    if cfg.wandb_project and accelerator.is_main_process:
         accelerator.end_training()
 
 
